@@ -56,6 +56,18 @@ class ImageViewerWidget(QWidget):
         self._quality_timer.setInterval(self.QUALITY_DELAY_MS)
         self._quality_timer.timeout.connect(self._finish_interaction)
 
+        # Layout options for double page spreads
+        self._double_page: bool = False
+        self._invert_page_order: bool = False
+        self._page_spacing: bool = True
+        self.SPACING: int = 10
+
+        # Secondary page attributes for spread display
+        self._sec_preview_pixmap: Optional[QPixmap] = None
+        self._sec_full_pixmap: Optional[QPixmap] = None
+        self._sec_source_size = QSize()
+        self._sec_image_path: Optional[str] = None
+
         # Common control handler emitting signals that activate viewer functions
         self._controls = CommonViewerControls(self)
         self._controls.connect_viewer(self)
@@ -77,6 +89,7 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = pixmap
         self._source_size = pixmap.size()
         self._image_path = None
+        self._clear_secondary_page()
         self.reset_view()
 
     def pixmap(self) -> Optional[QPixmap]:
@@ -89,8 +102,17 @@ class ImageViewerWidget(QWidget):
         return QSize(self._source_size)
 
     @property
+    def sec_source_size(self) -> QSize:
+        """Return original file dimensions for the secondary page in a spread."""
+        return QSize(self._sec_source_size)
+
+    @property
     def image_path(self) -> Optional[str]:
         return self._image_path
+
+    @property
+    def sec_image_path(self) -> Optional[str]:
+        return self._sec_image_path
 
     def preview_bounds(self) -> QSize:
         """Return viewport dimensions in physical pixels for preview decoding."""
@@ -99,6 +121,41 @@ class ImageViewerWidget(QWidget):
             max(1, int(round(self.width() * dpr))),
             max(1, int(round(self.height() * dpr))),
         )
+
+    def set_layout_options(
+        self,
+        *,
+        double_page: Optional[bool] = None,
+        invert_page_order: Optional[bool] = None,
+        page_spacing: Optional[bool] = None,
+    ) -> None:
+        """Update layout options for double page spreads."""
+        if double_page is not None:
+            self._double_page = double_page
+        if invert_page_order is not None:
+            self._invert_page_order = invert_page_order
+        if page_spacing is not None:
+            self._page_spacing = page_spacing
+        self.update()
+
+    def is_spread(self) -> bool:
+        """Return True if currently configured and loaded with a two-page spread."""
+        has_first = (
+            self._preview_pixmap is not None
+            and not self._preview_pixmap.isNull()
+            and self._source_size.isValid()
+        )
+        has_sec = (
+            self._sec_preview_pixmap is not None
+            and not self._sec_preview_pixmap.isNull()
+            and self._sec_source_size.isValid()
+        )
+        return self._double_page and has_first and has_sec
+
+    def _active_sec_pixmap(self) -> Optional[QPixmap]:
+        if self._sec_full_pixmap is not None and not self._sec_full_pixmap.isNull():
+            return self._sec_full_pixmap
+        return self._sec_preview_pixmap
 
     def set_preview_pixmap(
         self,
@@ -112,6 +169,39 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = None
         self._source_size = QSize(source_size)
         self._image_path = image_path
+        self._clear_secondary_page()
+        self._interactive_transform = False
+        if reset_view:
+            self.reset_view()
+            if not self._full_resolution_needed():
+                self._quality_timer.stop()
+        else:
+            self._clamp_pan_offset()
+            self._update_pan_cursor()
+            self.update()
+
+    def set_spread_preview(
+        self,
+        first_page: tuple[Optional[QPixmap], QSize, str],
+        second_page: Optional[tuple[Optional[QPixmap], QSize, str]] = None,
+        reset_view: bool = True,
+    ) -> None:
+        """Atomically install preview pixmaps for one page or two pages in a spread."""
+        pix1, size1, path1 = first_page
+        self._preview_pixmap = pix1
+        self._full_pixmap = None
+        self._source_size = QSize(size1)
+        self._image_path = path1
+
+        if second_page is not None:
+            pix2, size2, path2 = second_page
+            self._sec_preview_pixmap = pix2
+            self._sec_full_pixmap = None
+            self._sec_source_size = QSize(size2)
+            self._sec_image_path = path2
+        else:
+            self._clear_secondary_page()
+
         self._interactive_transform = False
         if reset_view:
             self.reset_view()
@@ -124,24 +214,44 @@ class ImageViewerWidget(QWidget):
 
     def set_refined_preview_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
         """Replace only the small render surface while preserving zoom and pan."""
-        if image_path != self._image_path:
-            return
-        self._preview_pixmap = pixmap
-        if self._zoom_factor <= 1.0:
-            self._full_pixmap = None
-        self.update()
+        updated = False
+        if image_path == self._image_path:
+            self._preview_pixmap = pixmap
+            if self._zoom_factor <= 1.0:
+                self._full_pixmap = None
+            updated = True
+        elif image_path == self._sec_image_path:
+            self._sec_preview_pixmap = pixmap
+            if self._zoom_factor <= 1.0:
+                self._sec_full_pixmap = None
+            updated = True
+        if updated:
+            self.update()
 
     def set_full_resolution_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
         """Install full pixels for detailed zoom without changing view geometry."""
-        if image_path != self._image_path:
-            return
-        self._full_pixmap = pixmap
-        self.update()
+        updated = False
+        if image_path == self._image_path:
+            self._full_pixmap = pixmap
+            updated = True
+        elif image_path == self._sec_image_path:
+            self._sec_full_pixmap = pixmap
+            updated = True
+        if updated:
+            self.update()
 
     def release_full_resolution(self) -> None:
         """Drop the large buffer while retaining the small transition preview."""
         self._full_pixmap = None
+        self._sec_full_pixmap = None
         self.update()
+
+    def _clear_secondary_page(self) -> None:
+        """Release all state associated with the optional second page."""
+        self._sec_preview_pixmap = None
+        self._sec_full_pixmap = None
+        self._sec_source_size = QSize()
+        self._sec_image_path = None
 
     def release_render_cache(self) -> None:
         """Drop all decoded buffers when this viewer is not the active mode."""
@@ -149,6 +259,7 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = None
         self._source_size = QSize()
         self._image_path = None
+        self._clear_secondary_page()
         self._quality_timer.stop()
         self.update()
 
@@ -158,6 +269,7 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = None
         self._source_size = QSize()
         self._image_path = None
+        self._clear_secondary_page()
         self._quality_timer.stop()
         self.reset_view()
 
@@ -166,6 +278,7 @@ class ImageViewerWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_offset = QPointF(0.0, 0.0)
         self._full_pixmap = None
+        self._sec_full_pixmap = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
         self.zoom_changed.emit(self._zoom_factor)
@@ -234,7 +347,7 @@ class ImageViewerWidget(QWidget):
         self.zoom_at(0.8)
 
     def target_rect(self) -> QRect:
-        """Calculate the target rectangle of the image within widget bounds,
+        """Calculate the target rectangle of the image/spread within widget bounds,
         accounting for zoom and pan while preserving aspect ratio.
         """
         if not self._has_image():
@@ -244,34 +357,105 @@ class ImageViewerWidget(QWidget):
         if widget_size.width() <= 0 or widget_size.height() <= 0:
             return QRect()
 
-        base_size = self._source_size.scaled(
-            widget_size, Qt.AspectRatioMode.KeepAspectRatio
-        )
-        w = base_size.width() * self._zoom_factor
-        h = base_size.height() * self._zoom_factor
-        x = (widget_size.width() - w) / 2.0 + self._pan_offset.x()
-        y = (widget_size.height() - h) / 2.0 + self._pan_offset.y()
+        if not self.is_spread():
+            base_size = self._source_size.scaled(
+                widget_size, Qt.AspectRatioMode.KeepAspectRatio
+            )
+            w = base_size.width() * self._zoom_factor
+            h = base_size.height() * self._zoom_factor
+            x = (widget_size.width() - w) / 2.0 + self._pan_offset.x()
+            y = (widget_size.height() - h) / 2.0 + self._pan_offset.y()
+            return QRect(int(round(x)), int(round(y)), int(round(w)), int(round(h)))
 
-        return QRect(int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+        size1 = self._source_size
+        size2 = self._sec_source_size
+        h_norm = max(size1.height(), size2.height(), 1)
+        w1 = size1.width() * (h_norm / max(1, size1.height()))
+        w2 = size2.width() * (h_norm / max(1, size2.height()))
+        spacing = self.SPACING if self._page_spacing else 0
+        w_pages = w1 + w2
+        avail_w = max(1.0, widget_size.width() - spacing)
+
+        base_scale = min(
+            avail_w / max(1.0, w_pages),
+            widget_size.height() / max(1.0, h_norm),
+        )
+        total_w = w_pages * base_scale * self._zoom_factor + spacing
+        total_h = h_norm * base_scale * self._zoom_factor
+        x = (widget_size.width() - total_w) / 2.0 + self._pan_offset.x()
+        y = (widget_size.height() - total_h) / 2.0 + self._pan_offset.y()
+        return QRect(int(round(x)), int(round(y)), int(round(total_w)), int(round(total_h)))
+
+    def target_rects(self) -> list[tuple[QRect, Optional[QPixmap]]]:
+        """Return list of (target_rect, pixmap) for each page to draw."""
+        if not self._has_image():
+            return []
+
+        if not self.is_spread():
+            pix = self._active_pixmap()
+            rect = self.target_rect()
+            return [(rect, pix)] if pix and not rect.isEmpty() else []
+
+        widget_size = self.size()
+        if widget_size.width() <= 0 or widget_size.height() <= 0:
+            return []
+
+        pix1 = self._active_pixmap()
+        pix2 = self._active_sec_pixmap()
+        size1 = self._source_size
+        size2 = self._sec_source_size
+
+        if self._invert_page_order:
+            left_pix, left_size = pix2, size2
+            right_pix, right_size = pix1, size1
+        else:
+            left_pix, left_size = pix1, size1
+            right_pix, right_size = pix2, size2
+
+        h_norm = max(size1.height(), size2.height(), 1)
+        w_l = left_size.width() * (h_norm / max(1, left_size.height()))
+        w_r = right_size.width() * (h_norm / max(1, right_size.height()))
+        spacing = self.SPACING if self._page_spacing else 0
+        w_pages = w_l + w_r
+        avail_w = max(1.0, widget_size.width() - spacing)
+
+        base_scale = min(
+            avail_w / max(1.0, w_pages),
+            widget_size.height() / max(1.0, h_norm),
+        )
+        scaled_w_l = w_l * base_scale * self._zoom_factor
+        scaled_w_r = w_r * base_scale * self._zoom_factor
+        scaled_s = spacing
+        scaled_h = h_norm * base_scale * self._zoom_factor
+        total_w = scaled_w_l + scaled_s + scaled_w_r
+
+        x = (widget_size.width() - total_w) / 2.0 + self._pan_offset.x()
+        y = (widget_size.height() - scaled_h) / 2.0 + self._pan_offset.y()
+
+        rect_l = QRect(int(round(x)), int(round(y)), int(round(scaled_w_l)), int(round(scaled_h)))
+        rect_r = QRect(int(round(x + scaled_w_l + scaled_s)), int(round(y)), int(round(scaled_w_r)), int(round(scaled_h)))
+
+        results = []
+        if left_pix is not None and not left_pix.isNull() and not rect_l.isEmpty():
+            results.append((rect_l, left_pix))
+        if right_pix is not None and not right_pix.isNull() and not rect_r.isEmpty():
+            results.append((rect_r, right_pix))
+        return results
 
     def paintEvent(self, event):
         """Draw one complete buffered frame using the cheapest suitable pixel source."""
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#1a1a1a"))
 
-        pixmap = self._active_pixmap()
-        if (
-            pixmap is not None
-            and not pixmap.isNull()
-            and self.width() > 0
-            and self.height() > 0
-        ):
-            painter.setRenderHint(
-                QPainter.RenderHint.SmoothPixmapTransform,
-                not self._interactive_transform,
-            )
-            rect = self.target_rect()
-            if not rect.isEmpty():
+        if not self._has_image() or self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform,
+            not self._interactive_transform,
+        )
+        for rect, pixmap in self.target_rects():
+            if pixmap is not None and not pixmap.isNull() and not rect.isEmpty():
                 painter.drawPixmap(rect, pixmap)
 
     def resizeEvent(self, event: QResizeEvent):
@@ -282,25 +466,27 @@ class ImageViewerWidget(QWidget):
             self._begin_interaction()
 
     def _has_image(self) -> bool:
-        return (
+        has_first = (
             self._preview_pixmap is not None
             and not self._preview_pixmap.isNull()
             and self._source_size.isValid()
         )
+        has_sec = (
+            self._sec_preview_pixmap is not None
+            and not self._sec_preview_pixmap.isNull()
+            and self._sec_source_size.isValid()
+        )
+        return has_first or has_sec
 
     def _pan_limits(self) -> QPointF:
-        """Return maximum centred pan offsets for the current scaled image."""
+        """Return maximum centred pan offsets for the current scaled image or spread."""
         if not self._has_image() or self.width() <= 0 or self.height() <= 0:
             return QPointF(0.0, 0.0)
 
-        base_size = self._source_size.scaled(
-            self.size(), Qt.AspectRatioMode.KeepAspectRatio
-        )
-        scaled_width = base_size.width() * self._zoom_factor
-        scaled_height = base_size.height() * self._zoom_factor
+        rect = self.target_rect()
         return QPointF(
-            max(0.0, (scaled_width - self.width()) / 2.0),
-            max(0.0, (scaled_height - self.height()) / 2.0),
+            max(0.0, (rect.width() - self.width()) / 2.0),
+            max(0.0, (rect.height() - self.height()) / 2.0),
         )
 
     def _can_pan(self) -> bool:

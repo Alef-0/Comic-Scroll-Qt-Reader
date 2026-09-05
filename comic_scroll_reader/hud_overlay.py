@@ -1,5 +1,7 @@
 """Floating reader-controls HUD for Comic Scroll Reader."""
 
+from typing import Optional
+
 from PyQt6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
@@ -212,7 +214,14 @@ class ViewerHud(QWidget):
         sep.setStyleSheet("color: rgba(255, 255, 255, 0.2); max-width: 1px; margin: 4px 2px;")
         return sep
 
-    def set_page_info(self, current_index: int, total_pages: int):
+    def set_page_info(
+        self,
+        current_index: int,
+        total_pages: int,
+        can_prev: Optional[bool] = None,
+        can_next: Optional[bool] = None,
+        display_label: Optional[str] = None,
+    ):
         """Update page indicator button and enable/disable navigation buttons."""
         if total_pages <= 0:
             self.btn_page.setText("Page 0 / 0")
@@ -221,10 +230,18 @@ class ViewerHud(QWidget):
             self._reserve_page_width(0)
             return
 
-        display_idx = current_index + 1 if current_index >= 0 else 1
-        self.btn_page.setText(f"Page {display_idx} / {total_pages}")
-        self.btn_prev.setEnabled(current_index > 0)
-        self.btn_next.setEnabled(current_index < total_pages - 1)
+        if display_label is not None:
+            self.btn_page.setText(display_label)
+        else:
+            display_idx = current_index + 1 if current_index >= 0 else 1
+            self.btn_page.setText(f"Page {display_idx} / {total_pages}")
+
+        self.btn_prev.setEnabled(
+            can_prev if can_prev is not None else current_index > 0
+        )
+        self.btn_next.setEnabled(
+            can_next if can_next is not None else current_index < total_pages - 1
+        )
         self._reserve_page_width(total_pages)
 
     def _reserve_page_width(self, total_pages: int) -> None:

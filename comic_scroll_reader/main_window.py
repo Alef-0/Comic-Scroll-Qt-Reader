@@ -3,11 +3,10 @@
 import os
 import re
 import sys
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from enum import Enum
 from PyQt6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QInputDialog,
     QMainWindow,
@@ -18,7 +17,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
-    QColor,
     QDragEnterEvent,
     QDragLeaveEvent,
     QDragMoveEvent,
@@ -26,12 +24,11 @@ from PyQt6.QtGui import (
     QIcon,
     QKeyEvent,
     QMouseEvent,
-    QPainter,
     QPixmap,
     QResizeEvent,
     QWheelEvent,
 )
-from PyQt6.QtCore import QEvent, Qt, QRect, QPointF, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QSize, pyqtSignal
 
 from .about_dialog import AboutDialog
 from .hud_overlay import ViewerHud
@@ -241,6 +238,7 @@ class MainWindow(QMainWindow):
         # Native Menu Bar
         self.comic_mode = ComicMode.CUSTOM
         self._init_menu_bar()
+        self._sync_comic_mode_state()
 
         # Image folder discovery / PDF state
         self.folder_path: Optional[str] = None
@@ -248,9 +246,10 @@ class MainWindow(QMainWindow):
         self.image_list: List[str] = []
         self.current_index: int = -1
         self._requested_index: Optional[int] = None
+        self._spread_pending_results: dict[str, DecodeResult] = {}
         self._request_generation = 0
-        self._full_request_pending = False
-        self._refine_request_key: Optional[tuple[str, int, int]] = None
+        self._full_request_paths: set[str] = set()
+        self._refine_request_keys: set[tuple[str, int, int]] = set()
         self._error_dialog: Optional[QMessageBox] = None
         self._single_scroll_transition: Optional[
             tuple[int, float, float, bool]
@@ -284,8 +283,9 @@ class MainWindow(QMainWindow):
             # Sync active index from single image viewer to scroll reader
             self._request_generation += 1
             self._requested_index = None
-            self._full_request_pending = False
-            self._refine_request_key = None
+            self._full_request_paths.clear()
+            self._refine_request_keys.clear()
+            self._spread_pending_results.clear()
             self._image_pipeline.cancel_queued(
                 {
                     "current-preview",
@@ -301,6 +301,7 @@ class MainWindow(QMainWindow):
                 self.scroll_reader.scroll_to_index(self.current_index)
 
         self.update_title()
+        self._sync_comic_mode_state()
 
     def toggle_mode(self) -> None:
         """Alternate between Single Image and Scroll Reader modes."""
@@ -313,48 +314,161 @@ class MainWindow(QMainWindow):
         """Apply one of the coordinated comic layout presets."""
         selected = mode if isinstance(mode, ComicMode) else ComicMode(mode)
         if selected == ComicMode.CUSTOM:
+            self._sync_comic_mode_state()
             return
 
         presets = {
             ComicMode.COMICS: (True, False, True, True),
             ComicMode.MANGA: (True, True, True, True),
-            ComicMode.WEBTOON: (False, False, False, True),
+            ComicMode.WEBTOON: (False, False, False, False),
         }
         double_page, invert_order, page_spacing, detect_spreads = presets[selected]
-        self.comic_mode = selected
 
         self._double_page_action.setChecked(double_page)
         self._invert_pages_action.setChecked(invert_order)
         self._page_spacing_action.setChecked(page_spacing)
         self._double_spread_action.setChecked(detect_spreads)
-        self._comic_actions[selected].setChecked(True)
+
         self.scroll_reader.set_layout_options(
             double_page=double_page,
             invert_page_order=invert_order,
             page_spacing=page_spacing,
             detect_double_spreads=detect_spreads,
         )
+        self.image_viewer.set_layout_options(
+            double_page=double_page,
+            invert_page_order=invert_order,
+            page_spacing=page_spacing,
+        )
         if selected == ComicMode.WEBTOON:
             self.scroll_reader.reset_zoom()
-        self._hud.set_comic_mode(selected.value)
-        self._hud.reposition(self.width(), self.height())
-        self.set_mode(ViewerMode.SCROLL)
+            self.set_mode(ViewerMode.SCROLL)
+
+        self._sync_comic_mode_state()
+        if self.viewer_mode == ViewerMode.SINGLE and self.image_list and self.current_index >= 0:
+            self._request_index(self.current_index, force=True)
+
+    def _resolve_matching_comic_mode(self) -> ComicMode:
+        """Determine which ComicMode matches the currently active layout and viewer settings."""
+        if not hasattr(self, "_double_page_action"):
+            return ComicMode.CUSTOM
+
+        dp = self._double_page_action.isChecked()
+        inv = self._invert_pages_action.isChecked()
+        sp = self._page_spacing_action.isChecked()
+        ds = self._double_spread_action.isChecked()
+        is_scroll = (self.viewer_mode == ViewerMode.SCROLL)
+
+        # Comic Mode: Dual page, No change in mode. Activate Spacing and Double Spread, disable invert
+        if dp and not inv and sp and ds:
+            return ComicMode.COMICS
+
+        # Manga Mode: Dual Page. No change in mode. Activate Spacing and Double Spread, enable invert
+        if dp and inv and sp and ds:
+            return ComicMode.MANGA
+
+        # Webtoon: Scroll, disable spacing, disable the rest.
+        if is_scroll and not dp and not inv and not sp and not ds:
+            return ComicMode.WEBTOON
+
+        return ComicMode.CUSTOM
+
+    def _sync_comic_mode_state(self) -> None:
+        """Synchronize comic_mode property, menu checkmarks, and HUD overlay with current config."""
+        matched = self._resolve_matching_comic_mode()
+        self.comic_mode = matched
+
+        if hasattr(self, "_comic_mode_group") and hasattr(self, "_comic_actions"):
+            self._comic_mode_group.setExclusive(False)
+            for act_mode, action in self._comic_actions.items():
+                action.setChecked(act_mode == matched)
+            self._comic_mode_group.setExclusive(True)
+
+        if hasattr(self, "_hud"):
+            self._hud.set_comic_mode(matched.value)
+            self._hud.reposition(self.width(), self.height())
 
     def _apply_custom_layout_options(self) -> None:
-        """Apply individually selected View options and mark the preset custom."""
+        """Apply individually selected View options and coordinate with matching preset."""
+        dp = self._double_page_action.isChecked()
+        inv = self._invert_pages_action.isChecked()
+        sp = self._page_spacing_action.isChecked()
+        ds = self._double_spread_action.isChecked()
+
         self.scroll_reader.set_layout_options(
-            double_page=self._double_page_action.isChecked(),
-            invert_page_order=self._invert_pages_action.isChecked(),
-            page_spacing=self._page_spacing_action.isChecked(),
-            detect_double_spreads=self._double_spread_action.isChecked(),
+            double_page=dp,
+            invert_page_order=inv,
+            page_spacing=sp,
+            detect_double_spreads=ds,
         )
-        self.comic_mode = ComicMode.CUSTOM
-        self._comic_mode_group.setExclusive(False)
-        for action in self._comic_actions.values():
-            action.setChecked(False)
-        self._comic_mode_group.setExclusive(True)
-        self._hud.set_comic_mode(ComicMode.CUSTOM.value)
-        self._hud.reposition(self.width(), self.height())
+        self.image_viewer.set_layout_options(
+            double_page=dp,
+            invert_page_order=inv,
+            page_spacing=sp,
+        )
+        self._sync_comic_mode_state()
+        if self.viewer_mode == ViewerMode.SINGLE and self.image_list and self.current_index >= 0:
+            self._request_index(self.current_index, force=True)
+
+    def _double_spread_indices(self) -> Set[int]:
+        if not self._double_spread_action.isChecked() or not self.image_list:
+            return set()
+        widths_by_index = {
+            index: self.scroll_reader._get_source_size(path).width()
+            for index, path in enumerate(self.image_list)
+        }
+        widths = [width for width in widths_by_index.values() if width > 0]
+        if not widths:
+            return set()
+        average_width = sum(widths) / len(widths)
+        return {
+            index
+            for index, width in widths_by_index.items()
+            if width > average_width * 1.5
+        }
+
+    def _compute_spreads(self) -> List[tuple[int, ...]]:
+        if not self.image_list:
+            return []
+        if not self._double_page_action.isChecked():
+            return [(i,) for i in range(len(self.image_list))]
+
+        spreads: List[tuple[int, ...]] = []
+        spread_indices = self._double_spread_indices()
+
+        # Cover (index 0) is always alone
+        spreads.append((0,))
+
+        index = 1
+        n = len(self.image_list)
+        while index < n:
+            if index in spread_indices:
+                spreads.append((index,))
+                index += 1
+                continue
+
+            next_index = index + 1
+            can_pair = (
+                next_index < n
+                and next_index not in spread_indices
+            )
+            if not can_pair:
+                spreads.append((index,))
+                index += 1
+                continue
+
+            spreads.append((index, next_index))
+            index += 2
+
+        return spreads
+
+    def _get_spread_for_index(self, index: int) -> tuple[int, ...]:
+        if not (0 <= index < len(self.image_list)):
+            return ()
+        for spread in self._compute_spreads():
+            if index in spread:
+                return spread
+        return (index,)
 
     def _on_scroll_visible_changed(self, index: int) -> None:
         """Update current index and title when scrolling in Scroll Reader mode."""
@@ -483,6 +597,7 @@ class MainWindow(QMainWindow):
 
         # PDF documents open by default in single page mode
         self.viewer_mode = ViewerMode.SINGLE
+        self._sync_comic_mode_state()
         self._stack.setCurrentWidget(self.image_viewer)
 
         requested_index = max(0, min(start_page, len(self.image_list) - 1))
@@ -544,14 +659,49 @@ class MainWindow(QMainWindow):
         mode_tag = " [Scroll]" if self.viewer_mode == ViewerMode.SCROLL else ""
 
         if self._requested_index is not None:
-            path = self.image_list[self._requested_index]
-            filename = self._display_name(path)
-            self.setWindowTitle(
-                f"{APP_NAME}{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
-                f"Loading {filename}…"
+            spread = (
+                self._get_spread_for_index(self._requested_index)
+                if self.viewer_mode == ViewerMode.SINGLE
+                else (self._requested_index,)
             )
-            if hasattr(self, "_hud"):
-                self._hud.set_page_info(self._requested_index, len(self.image_list))
+            spreads = self._compute_spreads() if self.viewer_mode == ViewerMode.SINGLE else []
+            if len(spread) == 2:
+                name1 = self._display_name(self.image_list[spread[0]])
+                name2 = self._display_name(self.image_list[spread[1]])
+                counter = f"[{spread[0] + 1}-{spread[1] + 1}/{len(self.image_list)}]"
+                self.setWindowTitle(
+                    f"{APP_NAME}{mode_tag} - {counter} Loading {name1} | {name2}…"
+                )
+                if hasattr(self, "_hud"):
+                    pos = spreads.index(spread) if spread in spreads else 0
+                    self._hud.set_page_info(
+                        self._requested_index,
+                        len(self.image_list),
+                        can_prev=(pos > 0),
+                        can_next=(pos < len(spreads) - 1),
+                        display_label=f"Page {spread[0] + 1}-{spread[1] + 1} / {len(self.image_list)}",
+                    )
+            else:
+                path = self.image_list[self._requested_index]
+                filename = self._display_name(path)
+                self.setWindowTitle(
+                    f"{APP_NAME}{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
+                    f"Loading {filename}…"
+                )
+                if hasattr(self, "_hud"):
+                    if spreads and spread in spreads:
+                        pos = spreads.index(spread)
+                        can_prev = (pos > 0)
+                        can_next = (pos < len(spreads) - 1)
+                    else:
+                        can_prev = (self._requested_index > 0)
+                        can_next = (self._requested_index < len(self.image_list) - 1)
+                    self._hud.set_page_info(
+                        self._requested_index,
+                        len(self.image_list),
+                        can_prev=can_prev,
+                        can_next=can_next,
+                    )
             return
 
         if not (0 <= self.current_index < len(self.image_list)):
@@ -560,18 +710,12 @@ class MainWindow(QMainWindow):
                 self._hud.hide_immediately()
             return
 
-        path = self.image_list[self.current_index]
-        filename = self._display_name(path)
-        source_size = (
-            self.scroll_reader._get_source_size(path)
-            if self.viewer_mode == ViewerMode.SCROLL
-            else self.image_viewer.source_size
+        spread = (
+            self._get_spread_for_index(self.current_index)
+            if self.viewer_mode == ViewerMode.SINGLE
+            else (self.current_index,)
         )
-        dim_str = (
-            f" ({source_size.width()}x{source_size.height()})"
-            if source_size.isValid()
-            else ""
-        )
+        spreads = self._compute_spreads() if self.viewer_mode == ViewerMode.SINGLE else []
 
         if self.viewer_mode == ViewerMode.SCROLL:
             mode_tag = " [Scroll]"
@@ -583,33 +727,121 @@ class MainWindow(QMainWindow):
         zoom_pct = int(round(zoom_factor * 100))
         zoom_str = f" - {zoom_pct}%" if zoom_pct != 100 else ""
 
-        self.setWindowTitle(
-            f"{APP_NAME}{mode_tag} - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
-        )
-        if hasattr(self, "_hud"):
-            self._hud.set_page_info(self.current_index, len(self.image_list))
-            self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
-            self._hud.set_zoom(zoom_factor)
+        if len(spread) == 2:
+            path1 = self.image_list[spread[0]]
+            path2 = self.image_list[spread[1]]
+            name1 = self._display_name(path1)
+            name2 = self._display_name(path2)
+            sz1 = self.image_viewer.source_size
+            sz2 = self.image_viewer.sec_source_size
+            dim_str = ""
+            if sz1.isValid() and sz2.isValid():
+                dim_str = f" ({sz1.width()}x{sz1.height()} + {sz2.width()}x{sz2.height()})"
+            elif sz1.isValid():
+                dim_str = f" ({sz1.width()}x{sz1.height()})"
+            counter = f"[{spread[0] + 1}-{spread[1] + 1}/{len(self.image_list)}]"
+            self.setWindowTitle(
+                f"{APP_NAME}{mode_tag} - {counter} {name1} | {name2}{dim_str}{zoom_str}"
+            )
+            if hasattr(self, "_hud"):
+                pos = spreads.index(spread) if spread in spreads else 0
+                self._hud.set_page_info(
+                    self.current_index,
+                    len(self.image_list),
+                    can_prev=(pos > 0),
+                    can_next=(pos < len(spreads) - 1),
+                    display_label=f"Page {spread[0] + 1}-{spread[1] + 1} / {len(self.image_list)}",
+                )
+                self._hud.set_mode(False)
+                self._hud.set_zoom(zoom_factor)
+        else:
+            path = self.image_list[self.current_index]
+            filename = self._display_name(path)
+            source_size = (
+                self.scroll_reader._get_source_size(path)
+                if self.viewer_mode == ViewerMode.SCROLL
+                else self.image_viewer.source_size
+            )
+            dim_str = (
+                f" ({source_size.width()}x{source_size.height()})"
+                if source_size.isValid()
+                else ""
+            )
+            self.setWindowTitle(
+                f"{APP_NAME}{mode_tag} - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
+            )
+            if hasattr(self, "_hud"):
+                if spreads and spread in spreads:
+                    pos = spreads.index(spread)
+                    can_prev = (pos > 0)
+                    can_next = (pos < len(spreads) - 1)
+                else:
+                    can_prev = (self.current_index > 0)
+                    can_next = (self.current_index < len(self.image_list) - 1)
+                self._hud.set_page_info(
+                    self.current_index,
+                    len(self.image_list),
+                    can_prev=can_prev,
+                    can_next=can_next,
+                )
+                self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
+                self._hud.set_zoom(zoom_factor)
 
     def next_image(self):
-        """Navigate to next image in alphabetical order."""
+        """Navigate to next image or spread in alphabetical order."""
+        if not self.image_list:
+            return
+        if self.viewer_mode == ViewerMode.SINGLE:
+            spreads = self._compute_spreads()
+            curr_spread = self._get_spread_for_index(self._effective_index())
+            if curr_spread in spreads:
+                pos = spreads.index(curr_spread)
+                if pos < len(spreads) - 1:
+                    self.go_to_index(spreads[pos + 1][0])
+                return
         base_index = self._effective_index()
-        if self.image_list and base_index < len(self.image_list) - 1:
+        if base_index < len(self.image_list) - 1:
             self.go_to_index(base_index + 1)
 
     def prev_image(self):
-        """Navigate to previous image in alphabetical order."""
+        """Navigate to previous image or spread in alphabetical order."""
+        if not self.image_list:
+            return
+        if self.viewer_mode == ViewerMode.SINGLE:
+            spreads = self._compute_spreads()
+            curr_spread = self._get_spread_for_index(self._effective_index())
+            if curr_spread in spreads:
+                pos = spreads.index(curr_spread)
+                if pos > 0:
+                    self.go_to_index(spreads[pos - 1][0])
+                return
         base_index = self._effective_index()
-        if self.image_list and base_index > 0:
+        if base_index > 0:
             self.go_to_index(base_index - 1)
 
     def _scroll_single_page(
         self, direction: int, zoom_factor: float, horizontal_ratio: float
     ) -> None:
         """Cross a page boundary while retaining the single-view scroll state."""
-        target_index = self._effective_index() + direction
-        if not (0 <= target_index < len(self.image_list)):
+        if not self.image_list:
             return
+        if self.viewer_mode == ViewerMode.SINGLE:
+            spreads = self._compute_spreads()
+            curr_spread = self._get_spread_for_index(self._effective_index())
+            if curr_spread in spreads:
+                pos = spreads.index(curr_spread)
+                target_pos = pos + direction
+                if not (0 <= target_pos < len(spreads)):
+                    return
+                target_index = spreads[target_pos][0]
+            else:
+                target_index = self._effective_index() + direction
+                if not (0 <= target_index < len(self.image_list)):
+                    return
+        else:
+            target_index = self._effective_index() + direction
+            if not (0 <= target_index < len(self.image_list)):
+                return
         self._single_scroll_transition = (
             target_index,
             zoom_factor,
@@ -624,14 +856,29 @@ class MainWindow(QMainWindow):
             self.go_to_index(0)
 
     def last_image(self):
-        """Navigate to the last image."""
-        if self.image_list:
-            self.go_to_index(len(self.image_list) - 1)
+        """Navigate to the last image or spread."""
+        if not self.image_list:
+            return
+        if self.viewer_mode == ViewerMode.SINGLE:
+            spreads = self._compute_spreads()
+            if spreads:
+                self.go_to_index(spreads[-1][0])
+                return
+        self.go_to_index(len(self.image_list) - 1)
 
     def go_to_index(self, index: int):
         """Request an image and commit the index only after decoding succeeds."""
-        if 0 <= index < len(self.image_list) and index != self._effective_index():
-            self._request_index(index)
+        if not (0 <= index < len(self.image_list)):
+            return
+        if self.viewer_mode == ViewerMode.SINGLE:
+            target_spread = self._get_spread_for_index(index)
+            curr_spread = self._get_spread_for_index(self._effective_index())
+            if target_spread == curr_spread and self._requested_index is None:
+                return
+            self._request_index(target_spread[0])
+        else:
+            if index != self._effective_index():
+                self._request_index(index)
 
     def _effective_index(self) -> int:
         if self._requested_index is not None:
@@ -641,13 +888,21 @@ class MainWindow(QMainWindow):
     def _request_index(self, index: int, force: bool = False) -> bool:
         if not (0 <= index < len(self.image_list)):
             return False
-        if not force and index == self._effective_index():
+
+        spread = (
+            self._get_spread_for_index(index)
+            if self.viewer_mode == ViewerMode.SINGLE
+            else (index,)
+        )
+        base_index = spread[0] if spread else index
+        if not force and base_index == self._effective_index():
             return False
 
         self._request_generation += 1
-        self._requested_index = index
-        self._full_request_pending = False
-        self._refine_request_key = None
+        self._requested_index = base_index
+        self._spread_pending_results.clear()
+        self._full_request_paths.clear()
+        self._refine_request_keys.clear()
         self._image_pipeline.cancel_queued(
             {
                 "current-preview",
@@ -658,13 +913,16 @@ class MainWindow(QMainWindow):
         )
         self.image_viewer.release_full_resolution()
         self.update_title()
-        self._image_pipeline.request_preview(
-            self.image_list[index],
-            self.image_viewer.preview_bounds(),
-            self._request_generation,
-            purpose="current-preview",
-            priority=2,
-        )
+
+        bounds = self.image_viewer.preview_bounds()
+        for idx in spread:
+            self._image_pipeline.request_preview(
+                self.image_list[idx],
+                bounds,
+                self._request_generation,
+                purpose="current-preview",
+                priority=2,
+            )
         return True
 
     def _on_image_ready(self, result: DecodeResult) -> None:
@@ -677,8 +935,17 @@ class MainWindow(QMainWindow):
         if request.purpose == "current-preview":
             if self._requested_index is None:
                 return
-            expected_path = self.image_list[self._requested_index]
-            if request.path != expected_path:
+            spread = (
+                self._get_spread_for_index(self._requested_index)
+                if self.viewer_mode == ViewerMode.SINGLE
+                else (self._requested_index,)
+            )
+            expected_paths = [self.image_list[i] for i in spread]
+            if request.path not in expected_paths:
+                return
+
+            self._spread_pending_results[request.path] = result
+            if not all(p in self._spread_pending_results for p in expected_paths):
                 return
 
             accepted_index = self._requested_index
@@ -686,7 +953,7 @@ class MainWindow(QMainWindow):
             self._requested_index = None
             if self.viewer_mode == ViewerMode.SCROLL:
                 self.scroll_reader.scroll_to_index(accepted_index)
-            pixmap = QPixmap.fromImage(result.image)
+
             preserve_scroll = False
             if self._single_scroll_transition is not None:
                 transition_index = self._single_scroll_transition[0]
@@ -696,12 +963,29 @@ class MainWindow(QMainWindow):
                 )
                 if not preserve_scroll:
                     self._single_scroll_transition = None
-            self.image_viewer.set_preview_pixmap(
-                pixmap,
-                result.source_size,
-                request.path,
-                reset_view=not preserve_scroll,
-            )
+
+            if len(spread) == 2:
+                res1 = self._spread_pending_results[expected_paths[0]]
+                res2 = self._spread_pending_results[expected_paths[1]]
+                pix1 = QPixmap.fromImage(res1.image)
+                pix2 = QPixmap.fromImage(res2.image)
+                self.image_viewer.set_spread_preview(
+                    (pix1, res1.source_size, res1.request.path),
+                    (pix2, res2.source_size, res2.request.path),
+                    reset_view=not preserve_scroll,
+                )
+            else:
+                res = self._spread_pending_results[expected_paths[0]]
+                pix = QPixmap.fromImage(res.image)
+                self.image_viewer.set_preview_pixmap(
+                    pix,
+                    res.source_size,
+                    res.request.path,
+                    reset_view=not preserve_scroll,
+                )
+
+            self._spread_pending_results.clear()
+
             if preserve_scroll:
                 _, zoom_factor, horizontal_ratio, at_top = (
                     self._single_scroll_transition
@@ -711,40 +995,63 @@ class MainWindow(QMainWindow):
                     zoom_factor, horizontal_ratio, at_top
                 )
             self.update_title()
-            self.image_loaded.emit(request.path)
+            for p in expected_paths:
+                self.image_loaded.emit(p)
             self._prefetch_neighbours()
             return
 
         if not (0 <= self.current_index < len(self.image_list)):
             return
-        current_path = self.image_list[self.current_index]
-        if request.path != current_path:
+        spread = (
+            self._get_spread_for_index(self.current_index)
+            if self.viewer_mode == ViewerMode.SINGLE
+            else (self.current_index,)
+        )
+        current_paths = {self.image_list[idx] for idx in spread}
+        if request.path not in current_paths:
             return
 
         pixmap = QPixmap.fromImage(result.image)
         if request.purpose == "refined-preview":
-            self._refine_request_key = None
-            self.image_viewer.set_refined_preview_pixmap(pixmap, current_path)
+            bounds = request.bounds
+            if bounds is None:
+                return
+            key = (
+                request.path,
+                bounds.width(),
+                bounds.height(),
+            )
+            self._refine_request_keys.discard(key)
+            self.image_viewer.set_refined_preview_pixmap(pixmap, request.path)
         elif request.purpose == "current-full":
-            self._full_request_pending = False
+            self._full_request_paths.discard(request.path)
             if self.image_viewer.zoom_factor > 1.0:
-                self.image_viewer.set_full_resolution_pixmap(pixmap, current_path)
+                self.image_viewer.set_full_resolution_pixmap(pixmap, request.path)
 
     def _on_image_failed(self, result: DecodeResult) -> None:
         request = result.request
         if request.request_id != self._request_generation:
             return
         if request.purpose == "refined-preview":
-            self._refine_request_key = None
+            bounds = request.bounds
+            if bounds is None:
+                return
+            key = (
+                request.path,
+                bounds.width(),
+                bounds.height(),
+            )
+            self._refine_request_keys.discard(key)
             return
         if request.purpose == "current-full":
-            self._full_request_pending = False
+            self._full_request_paths.discard(request.path)
             return
         if request.purpose != "current-preview" or self._requested_index is None:
             return
 
         failed_path = request.path
         self._requested_index = None
+        self._spread_pending_results.clear()
         self._single_scroll_transition = None
         if self.current_index < 0:
             self.image_viewer.clear()
@@ -755,52 +1062,77 @@ class MainWindow(QMainWindow):
     def _request_refined_preview(self, bounds: QSize) -> None:
         if not (0 <= self.current_index < len(self.image_list)):
             return
-        path = self.image_list[self.current_index]
-        key = (path, bounds.width(), bounds.height())
-        if key == self._refine_request_key:
-            return
-        self._refine_request_key = key
-        self._image_pipeline.request_preview(
-            path,
-            bounds,
-            self._request_generation,
-            purpose="refined-preview",
-            priority=1,
+        spread = (
+            self._get_spread_for_index(self.current_index)
+            if self.viewer_mode == ViewerMode.SINGLE
+            else (self.current_index,)
         )
+        for idx in spread:
+            path = self.image_list[idx]
+            key = (path, bounds.width(), bounds.height())
+            if key in self._refine_request_keys:
+                continue
+            self._refine_request_keys.add(key)
+            self._image_pipeline.request_preview(
+                path,
+                bounds,
+                self._request_generation,
+                purpose="refined-preview",
+                priority=1,
+            )
 
     def _request_full_resolution(self) -> None:
-        if self._full_request_pending:
+        if self._full_request_paths:
             return
         if not (0 <= self.current_index < len(self.image_list)):
             return
         bounds = self.image_viewer.detail_bounds()
         if not bounds.isValid():
             return
-        self._full_request_pending = True
-        self._image_pipeline.request_preview(
-            self.image_list[self.current_index],
-            bounds,
-            self._request_generation,
-            purpose="current-full",
-            priority=1,
+        spread = (
+            self._get_spread_for_index(self.current_index)
+            if self.viewer_mode == ViewerMode.SINGLE
+            else (self.current_index,)
         )
+        self._full_request_paths = {self.image_list[idx] for idx in spread}
+        for idx in spread:
+            self._image_pipeline.request_preview(
+                self.image_list[idx],
+                bounds,
+                self._request_generation,
+                purpose="current-full",
+                priority=1,
+            )
 
     def _prefetch_neighbours(self) -> None:
         if not (0 <= self.current_index < len(self.image_list)):
             return
-        neighbour_indices = {
-            index
-            for index in (
-                self.current_index - 1,
-                self.current_index,
-                self.current_index + 1,
-            )
-            if 0 <= index < len(self.image_list)
-        }
+        if self.viewer_mode == ViewerMode.SINGLE:
+            spreads = self._compute_spreads()
+            curr_spread = self._get_spread_for_index(self.current_index)
+            neighbour_indices = set(curr_spread)
+            if curr_spread in spreads:
+                pos = spreads.index(curr_spread)
+                if pos > 0:
+                    neighbour_indices.update(spreads[pos - 1])
+                if pos < len(spreads) - 1:
+                    neighbour_indices.update(spreads[pos + 1])
+            current_spread_set = set(curr_spread)
+        else:
+            neighbour_indices = {
+                index
+                for index in (
+                    self.current_index - 1,
+                    self.current_index,
+                    self.current_index + 1,
+                )
+                if 0 <= index < len(self.image_list)
+            }
+            current_spread_set = {self.current_index}
         retained_paths = {self.image_list[index] for index in neighbour_indices}
         self._image_pipeline.retain_preview_paths(retained_paths)
         bounds = self.image_viewer.preview_bounds()
-        for index in sorted(neighbour_indices - {self.current_index}):
+        for index in sorted(neighbour_indices - current_spread_set):
             self._image_pipeline.request_preview(
                 self.image_list[index],
                 bounds,

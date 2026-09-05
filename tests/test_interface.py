@@ -8,7 +8,7 @@ from PyQt6.QtCore import QMimeData, QPointF, QSize, Qt, QUrl, QEvent
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QKeyEvent
 from PyQt6.QtWidgets import QApplication, QLabel
 
-from comic_scroll_reader.__main__ import parse_arguments
+from comic_scroll_reader.__main__ import is_desktop_file_installed, parse_arguments
 from comic_scroll_reader.about_dialog import AboutDialog
 from comic_scroll_reader.hud_overlay import ViewerHud
 from comic_scroll_reader.main_window import ComicMode, MainWindow, ViewerMode
@@ -30,6 +30,33 @@ class TestArgumentParser(unittest.TestCase):
     def test_argument_parsed_when_provided(self):
         args = parse_arguments(["/some/path/comic.pdf"])
         self.assertEqual(args.image_path, "/some/path/comic.pdf")
+
+
+class TestDesktopFileRegistration(unittest.TestCase):
+    """Test desktop file detection for portal registration."""
+
+    def test_nonexistent_desktop_file(self):
+        self.assertFalse(is_desktop_file_installed("nonexistent-app-id-xyz"))
+
+    def test_desktop_file_in_custom_xdg_data_dirs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            apps_dir = os.path.join(temp_dir, "applications")
+            os.makedirs(apps_dir, exist_ok=True)
+            desktop_path = os.path.join(apps_dir, "test-app.desktop")
+            with open(desktop_path, "w") as f:
+                f.write("[Desktop Entry]\n")
+
+            old_xdg = os.environ.get("XDG_DATA_DIRS")
+            try:
+                os.environ["XDG_DATA_DIRS"] = temp_dir
+                self.assertTrue(is_desktop_file_installed("test-app"))
+                self.assertTrue(is_desktop_file_installed("test-app.desktop"))
+                self.assertFalse(is_desktop_file_installed("other-app"))
+            finally:
+                if old_xdg is not None:
+                    os.environ["XDG_DATA_DIRS"] = old_xdg
+                else:
+                    os.environ.pop("XDG_DATA_DIRS", None)
 
 
 class TestWelcomeWidget(unittest.TestCase):
@@ -440,25 +467,96 @@ class TestMainWindowInterface(unittest.TestCase):
 
     def test_comic_mode_presets_coordinate_layout_and_hud(self):
         window = MainWindow(target_path=self.temp_dir)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
 
+        # Comic Mode: Dual page, No change in mode. Activate Spacing and Double Spread, disable invert
         window.set_comic_mode(ComicMode.COMICS)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
         self.assertTrue(window.scroll_reader.double_page)
         self.assertFalse(window.scroll_reader.invert_page_order)
         self.assertTrue(window.scroll_reader.page_spacing)
+        self.assertTrue(window.scroll_reader.detect_double_spreads)
+        self.assertEqual(window.comic_mode, ComicMode.COMICS)
         self.assertIn("Comics", window._hud.btn_comic_mode.text())
 
+        # Manga Mode: Dual Page. No change in mode. Activate Spacing and Double Spread, enable invert
         window.set_comic_mode(ComicMode.MANGA)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
         self.assertTrue(window.scroll_reader.double_page)
         self.assertTrue(window.scroll_reader.invert_page_order)
+        self.assertTrue(window.scroll_reader.page_spacing)
+        self.assertTrue(window.scroll_reader.detect_double_spreads)
+        self.assertEqual(window.comic_mode, ComicMode.MANGA)
         self.assertIn("Manga", window._hud.btn_comic_mode.text())
 
+        # Switching viewer mode preserves Comic/Manga preset
+        window.set_mode(ViewerMode.SCROLL)
+        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
+        self.assertEqual(window.comic_mode, ComicMode.MANGA)
+
+        # Webtoon Mode: Scroll, disable spacing, disable the rest
+        window.set_mode(ViewerMode.SINGLE)
         window.scroll_reader.zoom_in()
         window.set_comic_mode(ComicMode.WEBTOON)
         self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
         self.assertFalse(window.scroll_reader.double_page)
+        self.assertFalse(window.scroll_reader.invert_page_order)
         self.assertFalse(window.scroll_reader.page_spacing)
+        self.assertFalse(window.scroll_reader.detect_double_spreads)
         self.assertEqual(window.scroll_reader.zoom_factor, 1.0)
+        self.assertEqual(window.comic_mode, ComicMode.WEBTOON)
         self.assertIn("Webtoon", window._hud.btn_comic_mode.text())
+        window.deleteLater()
+
+    def test_comic_mode_dynamic_matching_on_option_changes(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
+
+        # Initially: double_page=False, invert=False, spacing=True, spread=True
+        # Enabling double page creates config: True, False, True, True -> matches Comics!
+        window._double_page_action.setChecked(True)
+        window._apply_custom_layout_options()
+        self.assertEqual(window.comic_mode, ComicMode.COMICS)
+        self.assertTrue(window._comic_actions[ComicMode.COMICS].isChecked())
+        self.assertIn("Comics", window._hud.btn_comic_mode.text())
+
+        # Enabling invert pages creates config: True, True, True, True -> matches Manga!
+        window._invert_pages_action.setChecked(True)
+        window._apply_custom_layout_options()
+        self.assertEqual(window.comic_mode, ComicMode.MANGA)
+        self.assertTrue(window._comic_actions[ComicMode.MANGA].isChecked())
+        self.assertIn("Manga", window._hud.btn_comic_mode.text())
+
+        # Disabling double spread creates config: True, True, True, False -> matches Custom!
+        window._double_spread_action.setChecked(False)
+        window._apply_custom_layout_options()
+        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
+        self.assertFalse(window._comic_actions[ComicMode.COMICS].isChecked())
+        self.assertFalse(window._comic_actions[ComicMode.MANGA].isChecked())
+        self.assertFalse(window._comic_actions[ComicMode.WEBTOON].isChecked())
+        self.assertIn("Custom", window._hud.btn_comic_mode.text())
+
+        # Disable all options while in Single mode -> remains Custom (Webtoon requires Scroll mode)
+        window._double_page_action.setChecked(False)
+        window._invert_pages_action.setChecked(False)
+        window._page_spacing_action.setChecked(False)
+        window._double_spread_action.setChecked(False)
+        window._apply_custom_layout_options()
+        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
+
+        # Switching to Scroll mode with all options disabled -> matches Webtoon!
+        window.set_mode(ViewerMode.SCROLL)
+        self.assertEqual(window.comic_mode, ComicMode.WEBTOON)
+        self.assertTrue(window._comic_actions[ComicMode.WEBTOON].isChecked())
+        self.assertIn("Webtoon", window._hud.btn_comic_mode.text())
+
+        # Switching back to Single mode while in Webtoon config -> becomes Custom!
+        window.set_mode(ViewerMode.SINGLE)
+        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
+        self.assertFalse(window._comic_actions[ComicMode.WEBTOON].isChecked())
+        self.assertIn("Custom", window._hud.btn_comic_mode.text())
+
         window.deleteLater()
 
     def test_toggle_fullscreen(self):

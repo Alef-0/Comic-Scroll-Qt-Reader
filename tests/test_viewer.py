@@ -652,6 +652,192 @@ class TestMainWindow(unittest.TestCase):
         self.assertEqual(window.image_viewer.image_path, current_path)
         window.deleteLater()
 
+    def test_refined_preview_completion_clears_its_request_key(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        path = window.image_list[window.current_index]
+        bounds = QSize(640, 480)
+        key = (path, bounds.width(), bounds.height())
+        window._refine_request_keys.add(key)
+        request = DecodeRequest(
+            request_id=window._request_generation,
+            path=path,
+            purpose="refined-preview",
+            bounds=bounds,
+            cache_key=(path, "refined"),
+        )
+
+        window._on_image_ready(
+            DecodeResult(
+                request,
+                QImage(64, 48, QImage.Format.Format_RGB32),
+                QSize(100, 100),
+            )
+        )
+
+        self.assertNotIn(key, window._refine_request_keys)
+        window.deleteLater()
+
+
+class TestSpreadSingleViewer(unittest.TestCase):
+    """Test suite for double spread support in ImageViewerWidget and Single Mode navigation."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.image_files = []
+        for i in range(5):
+            path = os.path.join(self.temp_dir, f"page_{i:02d}.png")
+            img = QImage(100, 150, QImage.Format.Format_RGB32)
+            img.fill(QColor(i * 40, i * 40, i * 40))
+            img.save(path)
+            self.image_files.append(path)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def assert_loaded(self, window, expected_index):
+        self.assertTrue(
+            wait_for_signal(
+                window.image_loaded,
+                lambda: window.current_index == expected_index
+                and window.image_viewer.pixmap() is not None,
+            ),
+            f"Timed out waiting for asynchronous image decoding of index {expected_index}",
+        )
+
+    def test_image_viewer_spread_geometry_and_inversion(self):
+        viewer = ImageViewerWidget()
+        viewer.resize(800, 600)
+        viewer.set_layout_options(double_page=True, invert_page_order=False, page_spacing=True)
+
+        pix1 = QPixmap(100, 150)
+        pix2 = QPixmap(100, 150)
+        viewer.set_spread_preview(
+            (pix1, QSize(100, 150), "p1.png"),
+            (pix2, QSize(100, 150), "p2.png"),
+        )
+
+        self.assertTrue(viewer.is_spread())
+        rects = viewer.target_rects()
+        self.assertEqual(len(rects), 2)
+        r1, p1 = rects[0]
+        r2, p2 = rects[1]
+        # In comic mode (invert_page_order=False): page 1 is on the left, page 2 on the right
+        self.assertEqual(p1, pix1)
+        self.assertEqual(p2, pix2)
+        self.assertLess(r1.right(), r2.left())
+        self.assertEqual(r2.left() - r1.right() - 1, viewer.SPACING)
+
+        # In Manga mode (invert_page_order=True): page 1 is on the right, page 2 on the left
+        viewer.set_layout_options(invert_page_order=True)
+        rects_manga = viewer.target_rects()
+        self.assertEqual(len(rects_manga), 2)
+        rm1, pm1 = rects_manga[0]
+        rm2, pm2 = rects_manga[1]
+        self.assertEqual(pm1, pix2)
+        self.assertEqual(pm2, pix1)
+        self.assertLess(rm1.right(), rm2.left())
+
+        viewer.deleteLater()
+
+    def test_direct_pixmap_replacement_clears_secondary_page(self):
+        viewer = ImageViewerWidget()
+        viewer.set_layout_options(double_page=True)
+        viewer.set_spread_preview(
+            (QPixmap(100, 150), QSize(100, 150), "p1.png"),
+            (QPixmap(100, 150), QSize(100, 150), "p2.png"),
+        )
+
+        viewer.set_pixmap(QPixmap(200, 300))
+
+        self.assertFalse(viewer.is_spread())
+        self.assertIsNone(viewer.sec_image_path)
+        self.assertFalse(viewer.sec_source_size.isValid())
+        viewer.deleteLater()
+
+    def test_reset_view_releases_both_full_resolution_pages(self):
+        viewer = ImageViewerWidget()
+        viewer.set_layout_options(double_page=True)
+        viewer.set_spread_preview(
+            (QPixmap(100, 150), QSize(100, 150), "p1.png"),
+            (QPixmap(100, 150), QSize(100, 150), "p2.png"),
+        )
+        viewer.set_full_resolution_pixmap(QPixmap(200, 300), "p1.png")
+        viewer.set_full_resolution_pixmap(QPixmap(200, 300), "p2.png")
+
+        viewer.reset_view()
+
+        self.assertIsNone(viewer._full_pixmap)
+        self.assertIsNone(viewer._sec_full_pixmap)
+        viewer.deleteLater()
+
+    def test_single_mode_spread_navigation_and_titles(self):
+        from comic_scroll_reader.main_window import ComicMode
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_comic_mode(ComicMode.COMICS)
+
+        # Cover (index 0) is a single page spread: spreads are [(0,), (1, 2), (3, 4)]
+        spreads = window._compute_spreads()
+        self.assertEqual(spreads, [(0,), (1, 2), (3, 4)])
+
+        # Starting at cover (index 0)
+        self.assertEqual(window.current_index, 0)
+        self.assertIn("page_00.png", window.windowTitle())
+
+        # Next image advances to the first dual spread: (1, 2)
+        window.next_image()
+        self.assert_loaded(window, 1)
+        self.assertEqual(window.current_index, 1)
+        self.assertTrue(window.image_viewer.is_spread())
+        self.assertIn("page_01.png", window.windowTitle())
+        self.assertIn("page_02.png", window.windowTitle())
+        self.assertIn("[2-3/5]", window.windowTitle())
+        self.assertEqual(window._hud.btn_page.text(), "Page 2-3 / 5")
+
+        # Next image advances to the next spread: (3, 4)
+        window.next_image()
+        self.assert_loaded(window, 3)
+        self.assertEqual(window.current_index, 3)
+        self.assertTrue(window.image_viewer.is_spread())
+        self.assertIn("[4-5/5]", window.windowTitle())
+        self.assertEqual(window._hud.btn_page.text(), "Page 4-5 / 5")
+
+        # Previous image returns to (1, 2)
+        window.prev_image()
+        self.assert_loaded(window, 1)
+        self.assertEqual(window.current_index, 1)
+        self.assertIn("[2-3/5]", window.windowTitle())
+
+        # Previous image returns to cover (0,)
+        window.prev_image()
+        self.assert_loaded(window, 0)
+        self.assertEqual(window.current_index, 0)
+        self.assertIn("[1/5]", window.windowTitle())
+
+        window.deleteLater()
+
+    def test_single_mode_wide_spread_isolation(self):
+        wide_path = os.path.join(self.temp_dir, "page_02_wide.png")
+        img_wide = QImage(500, 150, QImage.Format.Format_RGB32)
+        img_wide.fill(QColor(255, 0, 0))
+        img_wide.save(wide_path)
+
+        window = MainWindow(target_path=self.temp_dir)
+        from comic_scroll_reader.main_window import ComicMode
+        window.set_comic_mode(ComicMode.COMICS)
+
+        spread_indices = window._double_spread_indices()
+        self.assertTrue(len(spread_indices) > 0)
+
+        spreads = window._compute_spreads()
+        for spread in spreads:
+            for idx in spread:
+                if idx in spread_indices:
+                    self.assertEqual(len(spread), 1)
+
+        window.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

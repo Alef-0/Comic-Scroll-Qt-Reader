@@ -33,6 +33,17 @@ def parse_arguments(args=None):
     return parser.parse_args(args)
 
 
+def is_desktop_file_installed(app_id: str = "comic-scroll-reader") -> bool:
+    """Check if a corresponding .desktop file is installed in standard XDG application paths."""
+    filename = f"{app_id}.desktop" if not app_id.endswith(".desktop") else app_id
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    data_dirs = (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    search_dirs = [os.path.join(data_home, "applications")] + [
+        os.path.join(d, "applications") for d in data_dirs if d
+    ]
+    return any(os.path.isfile(os.path.join(d, filename)) for d in search_dirs)
+
+
 def main():
     """Main execution entry point."""
     args = parse_arguments()
@@ -46,8 +57,9 @@ def main():
 
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationDisplayName(APP_NAME)
+    if is_desktop_file_installed("comic-scroll-reader"):
+        QApplication.setDesktopFileName("comic-scroll-reader")
     app = QApplication(sys.argv)
-    app.setDesktopFileName("comic-scroll-reader.desktop")
 
     app_icon = QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.exists() else QIcon.fromTheme("comic-scroll-reader")
     app.setWindowIcon(app_icon)
