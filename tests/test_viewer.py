@@ -1,18 +1,40 @@
-"""Unit tests for the QPainter-based image viewer."""
+"""Unit tests for the QPainter-based image viewer, navigation, and zoom/pan controls."""
 
 import os
+import shutil
 import tempfile
 import unittest
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QImage, QPixmap, QColor
-from PyQt6.QtCore import Qt, QSize, QRect
+from PyQt6.QtGui import QImage, QPixmap, QColor, QKeyEvent
+from PyQt6.QtCore import Qt, QSize, QRect, QPointF
 
-from src.viewer import ImageViewerWidget, ScaledImageLabel, MainWindow
+from src.viewer import (
+    ImageViewerWidget,
+    ScaledImageLabel,
+    MainWindow,
+    natural_sort_key,
+)
 
 # Ensure single QApplication instance across tests
 app = QApplication.instance()
 if app is None:
     app = QApplication(["--platform", "offscreen"])
+
+
+class TestNaturalSort(unittest.TestCase):
+    """Test natural alphabetical ordering key."""
+
+    def test_natural_sort_order(self):
+        filenames = ["page10.png", "page2.png", "page1.png", "page20.png"]
+        sorted_files = sorted(filenames, key=natural_sort_key)
+        self.assertEqual(
+            sorted_files, ["page1.png", "page2.png", "page10.png", "page20.png"]
+        )
+
+    def test_case_insensitive_natural_sort(self):
+        filenames = ["Page2.png", "page1.png", "PAGE10.png"]
+        sorted_files = sorted(filenames, key=natural_sort_key)
+        self.assertEqual(sorted_files, ["page1.png", "Page2.png", "PAGE10.png"])
 
 
 class TestImageViewerWidget(unittest.TestCase):
@@ -30,6 +52,8 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertIsNone(self.viewer.pixmap())
         self.assertEqual(self.viewer.minimumSize(), QSize(1, 1))
         self.assertTrue(self.viewer.target_rect().isEmpty())
+        self.assertEqual(self.viewer.zoom_factor, 1.0)
+        self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
 
     def test_set_pixmap(self):
         """Verify setting a pixmap directly."""
@@ -43,12 +67,10 @@ class TestImageViewerWidget(unittest.TestCase):
 
     def test_target_rect_preserves_aspect_ratio(self):
         """Verify target_rect computes correct centered dimensions."""
-        # 200x100 image (2:1 aspect ratio) in 800x600 widget
         img = QImage(200, 100, QImage.Format.Format_RGB32)
         self.viewer.set_pixmap(QPixmap.fromImage(img))
 
         rect = self.viewer.target_rect()
-        # Should fit width 800, height should be 400, centered vertically at y=(600-400)/2 = 100
         self.assertEqual(rect.width(), 800)
         self.assertEqual(rect.height(), 400)
         self.assertEqual(rect.x(), 0)
@@ -56,12 +78,10 @@ class TestImageViewerWidget(unittest.TestCase):
 
     def test_target_rect_tall_aspect_ratio(self):
         """Verify target_rect computes correct dimensions for tall image."""
-        # 100x200 image (1:2 aspect ratio) in 800x600 widget
         img = QImage(100, 200, QImage.Format.Format_RGB32)
         self.viewer.set_pixmap(QPixmap.fromImage(img))
 
         rect = self.viewer.target_rect()
-        # Should fit height 600, width should be 300, centered horizontally at x=(800-300)/2 = 250
         self.assertEqual(rect.height(), 600)
         self.assertEqual(rect.width(), 300)
         self.assertEqual(rect.x(), 250)
@@ -69,7 +89,6 @@ class TestImageViewerWidget(unittest.TestCase):
 
     def test_load_valid_and_invalid_image(self):
         """Verify image loading from disk handles valid and invalid files."""
-        # Create a temporary image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             temp_path = f.name
 
@@ -78,12 +97,10 @@ class TestImageViewerWidget(unittest.TestCase):
             img.fill(QColor("red"))
             img.save(temp_path, "PNG")
 
-            # Load valid image
             self.assertTrue(self.viewer.load_image(temp_path))
             self.assertIsNotNone(self.viewer.pixmap())
             self.assertEqual(self.viewer.pixmap().width(), 50)
 
-            # Load non-existent image
             self.assertFalse(self.viewer.load_image("/non/existent/path/img.png"))
         finally:
             if os.path.exists(temp_path):
@@ -113,9 +130,90 @@ class TestImageViewerWidget(unittest.TestCase):
         """Verify ScaledImageLabel is an alias of ImageViewerWidget."""
         self.assertIs(ScaledImageLabel, ImageViewerWidget)
 
+    def test_zoom_in_and_zoom_out_preserves_aspect_ratio(self):
+        """Aspect ratio (w/h) is strictly preserved at various zoom levels."""
+        img = QImage(300, 150, QImage.Format.Format_RGB32)  # 2:1 aspect ratio
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+
+        rect_initial = self.viewer.target_rect()
+        self.assertAlmostEqual(rect_initial.width() / rect_initial.height(), 2.0)
+
+        # Zoom in
+        self.viewer.zoom_in()
+        rect_in = self.viewer.target_rect()
+        self.assertGreater(rect_in.width(), rect_initial.width())
+        self.assertAlmostEqual(rect_in.width() / rect_in.height(), 2.0)
+
+        # Zoom out
+        self.viewer.zoom_out()
+        self.viewer.zoom_out()
+        rect_out = self.viewer.target_rect()
+        self.assertLess(rect_out.width(), rect_initial.width())
+        self.assertAlmostEqual(rect_out.width() / rect_out.height(), 2.0)
+
+    def test_area_zoom_anchored_position(self):
+        """Zooming in on an area keeps the point under the cursor stationary."""
+        img = QImage(400, 200, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+        # Initial fit in 800x600: 800x400, centered at (0, 100)
+        anchor = QPointF(200, 200)
+
+        # Point in image relative to rect before zoom
+        rect_before = self.viewer.target_rect()
+        norm_x = (anchor.x() - rect_before.x()) / rect_before.width()
+        norm_y = (anchor.y() - rect_before.y()) / rect_before.height()
+
+        # Zoom 2x at anchor
+        self.viewer.zoom_at(2.0, anchor)
+        rect_after = self.viewer.target_rect()
+
+        # Check that the same normalized image point is still at anchor.x, anchor.y
+        recomputed_anchor_x = rect_after.x() + norm_x * rect_after.width()
+        recomputed_anchor_y = rect_after.y() + norm_y * rect_after.height()
+
+        self.assertAlmostEqual(recomputed_anchor_x, anchor.x(), delta=1.0)
+        self.assertAlmostEqual(recomputed_anchor_y, anchor.y(), delta=1.0)
+
+    def test_pan_by_updates_target_rect(self):
+        """Panning shifts target rect coordinates directly."""
+        img = QImage(200, 200, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+        rect1 = self.viewer.target_rect()
+
+        self.viewer.pan_by(50, -30)
+        rect2 = self.viewer.target_rect()
+        self.assertEqual(rect2.x(), rect1.x() + 50)
+        self.assertEqual(rect2.y(), rect1.y() - 30)
+
+    def test_reset_view(self):
+        """reset_view resets zoom factor to 1.0 and pan offset to 0."""
+        img = QImage(200, 200, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+        self.viewer.zoom_in()
+        self.viewer.pan_by(100, 100)
+        self.assertNotEqual(self.viewer.zoom_factor, 1.0)
+
+        self.viewer.reset_view()
+        self.assertEqual(self.viewer.zoom_factor, 1.0)
+        self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
+
 
 class TestMainWindow(unittest.TestCase):
     """Test suite for MainWindow."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.image_files = []
+        for name in ["page10.png", "page1.png", "page2.png"]:
+            path = os.path.join(self.temp_dir, name)
+            img = QImage(100, 100, QImage.Format.Format_RGB32)
+            img.fill(QColor("green"))
+            img.save(path, "PNG")
+            self.image_files.append(path)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
 
     def test_main_window_init(self):
         """Verify MainWindow initializes with correct dimensions and central widget."""
@@ -124,6 +222,90 @@ class TestMainWindow(unittest.TestCase):
         self.assertEqual(window.height(), MainWindow.DEFAULT_HEIGHT)
         self.assertIsInstance(window.viewer, ImageViewerWidget)
         self.assertIs(window.image_label, window.image_viewer)
+        window.deleteLater()
+
+    def test_folder_discovery_and_alphabetical_order(self):
+        """Verify images in folder are discovered and sorted alphabetically (page1, page2, page10)."""
+        window = MainWindow(target_path=self.temp_dir)
+        self.assertEqual(len(window.image_list), 3)
+        self.assertTrue(window.image_list[0].endswith("page1.png"))
+        self.assertTrue(window.image_list[1].endswith("page2.png"))
+        self.assertTrue(window.image_list[2].endswith("page10.png"))
+        self.assertEqual(window.current_index, 0)
+        self.assertIn("[1/3]", window.windowTitle())
+        self.assertIn("page1.png", window.windowTitle())
+        window.deleteLater()
+
+    def test_navigation_and_counter_updating(self):
+        """Verify next_image and prev_image update the title counter and clamp at bounds."""
+        window = MainWindow(target_path=self.temp_dir)
+
+        # Initially at page1 (1/3)
+        self.assertEqual(window.current_index, 0)
+        self.assertIn("[1/3]", window.windowTitle())
+
+        # Next -> page2 (2/3)
+        window.next_image()
+        self.assertEqual(window.current_index, 1)
+        self.assertIn("[2/3]", window.windowTitle())
+
+        # Next -> page10 (3/3)
+        window.next_image()
+        self.assertEqual(window.current_index, 2)
+        self.assertIn("[3/3]", window.windowTitle())
+
+        # Next again clamps at page10 (3/3)
+        window.next_image()
+        self.assertEqual(window.current_index, 2)
+        self.assertIn("[3/3]", window.windowTitle())
+
+        # Prev -> page2 (2/3)
+        window.prev_image()
+        self.assertEqual(window.current_index, 1)
+        self.assertIn("[2/3]", window.windowTitle())
+
+        # First and Last methods
+        window.last_image()
+        self.assertEqual(window.current_index, 2)
+        window.first_image()
+        self.assertEqual(window.current_index, 0)
+        window.deleteLater()
+
+    def test_initial_file_selects_correct_index(self):
+        """Opening a specific file in a folder sets current_index to that file."""
+        target_file = os.path.join(self.temp_dir, "page2.png")
+        window = MainWindow(image_path=target_file)
+        self.assertEqual(window.current_index, 1)
+        self.assertIn("[2/3]", window.windowTitle())
+        self.assertIn("page2.png", window.windowTitle())
+        window.deleteLater()
+
+    def test_empty_directory(self):
+        """Opening an empty directory displays [0/0] No images found."""
+        empty_dir = tempfile.mkdtemp()
+        try:
+            window = MainWindow(target_path=empty_dir)
+            self.assertEqual(len(window.image_list), 0)
+            self.assertIn("[0/0]", window.windowTitle())
+            window.deleteLater()
+        finally:
+            shutil.rmtree(empty_dir)
+
+    def test_keyboard_events_in_main_window(self):
+        """Verify MainWindow keyPressEvent triggers navigation and zoom."""
+        window = MainWindow(target_path=self.temp_dir)
+        self.assertEqual(window.current_index, 0)
+
+        # Key Right -> Next
+        event_right = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+        window.keyPressEvent(event_right)
+        self.assertEqual(window.current_index, 1)
+
+        # Ctrl+Plus -> Zoom In
+        initial_zoom = window.image_viewer.zoom_factor
+        event_zoom = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
+        window.keyPressEvent(event_zoom)
+        self.assertGreater(window.image_viewer.zoom_factor, initial_zoom)
         window.deleteLater()
 
 
