@@ -545,40 +545,34 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
             "Timed out waiting for asynchronous image decoding",
         )
 
-    def test_starts_in_scroll_reader_mode(self):
-        """From now on, MainWindow must start in scroll reader mode by default."""
+    def test_starts_in_single_page_mode(self):
+        """MainWindow must start in single page mode by default."""
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
-        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
-        self.assertIs(window._stack.currentWidget(), window.scroll_reader)
-        self.assertIn("[Scroll]", window.windowTitle())
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertIs(window._stack.currentWidget(), window.image_viewer)
+        self.assertNotIn("[Scroll]", window.windowTitle())
         window.deleteLater()
 
     def test_scroll_starts_in_image_passed(self):
-        """When opened with a specific image file, scroll reader starts positioned on that image."""
+        """When opened with a specific image file, viewer starts positioned on that image."""
         target_file = os.path.join(self.temp_dir, "page2.png")
         window = MainWindow(image_path=target_file)
         self.assert_loaded(window, 1)
 
         self.assertEqual(window.current_index, 1)
-        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertIn("page2.png", window.windowTitle())
+        window.set_mode(ViewerMode.SCROLL)
         rects = window.scroll_reader.image_rects
         self.assertEqual(window.scroll_reader.verticalScrollBar().value(), rects[1].y())
-        self.assertIn("page2.png", window.windowTitle())
         window.deleteLater()
 
     def test_toggle_mode_via_keys_1_and_2(self):
-        """Key 1 switches to Single Image mode; Key 2 switches to Scroll Reader mode."""
+        """Key 2 switches to Scroll Reader mode; Key 1 switches to Single Image mode."""
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
-        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
-
-        # Press Key 1 -> Switch to Single Image mode
-        key1_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.NoModifier)
-        window.keyPressEvent(key1_ev)
         self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
-        self.assertIs(window._stack.currentWidget(), window.image_viewer)
-        self.assertNotIn("[Scroll]", window.windowTitle())
 
         # Press Key 2 -> Switch to Scroll Reader mode
         key2_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_2, Qt.KeyboardModifier.NoModifier)
@@ -587,23 +581,30 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
         self.assertIs(window._stack.currentWidget(), window.scroll_reader)
         self.assertIn("[Scroll]", window.windowTitle())
 
+        # Press Key 1 -> Switch to Single Image mode
+        key1_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.NoModifier)
+        window.keyPressEvent(key1_ev)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertIs(window._stack.currentWidget(), window.image_viewer)
+        self.assertNotIn("[Scroll]", window.windowTitle())
+
         window.deleteLater()
 
     def test_alternate_mode_via_right_click(self):
         """Right mouse button alternates between Single Image and Scroll Reader modes."""
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
-        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
-
-        # Right click in scroll reader -> alternates to Single Image mode
-        window.toggle_mode()
         self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
-        self.assertIs(window._stack.currentWidget(), window.image_viewer)
 
-        # Right click again -> alternates back to Scroll Reader mode
+        # Right click in single viewer -> alternates to Scroll Reader mode
         window.toggle_mode()
         self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
         self.assertIs(window._stack.currentWidget(), window.scroll_reader)
+
+        # Right click again -> alternates back to Single Image mode
+        window.toggle_mode()
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertIs(window._stack.currentWidget(), window.image_viewer)
 
         window.deleteLater()
 
@@ -612,29 +613,30 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
 
-        # Scroll to page2 (index 1) in scroll reader
-        window.scroll_reader.scroll_to_index(1)
-        self.assertEqual(window.scroll_reader.current_visible_index(), 1)
-
-        # Switch to Single Image mode via Key 1
-        key1_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.NoModifier)
-        window.keyPressEvent(key1_ev)
-        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        # Navigate to page2 (index 1) in Single Image mode
+        window.next_image()
+        self.assert_loaded(window, 1)
         self.assertEqual(window.current_index, 1)
         self.assertIn("page2.png", window.windowTitle())
 
-        # Navigate to page10 (index 2) in Single Image mode
-        window.next_image()
-        self.assert_loaded(window, 2)
-        self.assertEqual(window.current_index, 2)
-
-        # Switch back to Scroll Reader mode via Key 2
+        # Switch to Scroll Reader mode via Key 2
         key2_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_2, Qt.KeyboardModifier.NoModifier)
         window.keyPressEvent(key2_ev)
         self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
-        self.assertEqual(window.scroll_reader.current_visible_index(), 2)
+        self.assertEqual(window.scroll_reader.current_visible_index(), 1)
         rects = window.scroll_reader.image_rects
-        self.assertEqual(window.scroll_reader.verticalScrollBar().value(), rects[2].y())
+        self.assertEqual(window.scroll_reader.verticalScrollBar().value(), rects[1].y())
+
+        # Scroll to page10 (index 2) in scroll reader
+        window.scroll_reader.scroll_to_index(2)
+        self.assertEqual(window.scroll_reader.current_visible_index(), 2)
+
+        # Switch back to Single Image mode via Key 1
+        key1_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.NoModifier)
+        window.keyPressEvent(key1_ev)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertEqual(window.current_index, 2)
+        self.assertIn("page10.png", window.windowTitle())
 
         window.deleteLater()
 

@@ -156,8 +156,8 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self.welcome_widget)
         self.setCentralWidget(self._stack)
 
-        # Initial mode: Scroll reader mode
-        self.viewer_mode = ViewerMode.SCROLL
+        # Initial mode: Single page mode
+        self.viewer_mode = ViewerMode.SINGLE
         self._stack.setCurrentWidget(self.welcome_widget)
 
         # Connect image viewer signals
@@ -415,7 +415,7 @@ class MainWindow(QMainWindow):
             except ValueError:
                 requested_index = 0 if self.image_list else -1
 
-        self.current_index = -1
+        self.current_index = requested_index
         self._requested_index = None
         self._single_scroll_transition = None
 
@@ -446,7 +446,7 @@ class MainWindow(QMainWindow):
             return False
 
     def open_pdf(self, pdf_path: str, start_page: int = 0) -> bool:
-        """Open a PDF document, acquire all page URIs and sizes, and display in scroll mode by default."""
+        """Open a PDF document, acquire all page URIs and sizes, and display in single page mode by default."""
         resolved = os.path.abspath(pdf_path)
         if not is_pdf_file(resolved):
             return False
@@ -481,19 +481,19 @@ class MainWindow(QMainWindow):
         self.setMaximumSize(16777215, 16777215)
         self.resize(self.VIEWER_WIDTH, self.VIEWER_HEIGHT)
 
-        # PDF documents open by default on scroll mode
-        self.viewer_mode = ViewerMode.SCROLL
-        self._stack.setCurrentWidget(self.scroll_reader)
+        # PDF documents open by default in single page mode
+        self.viewer_mode = ViewerMode.SINGLE
+        self._stack.setCurrentWidget(self.image_viewer)
 
         requested_index = max(0, min(start_page, len(self.image_list) - 1))
-        self.current_index = -1
+        self.current_index = requested_index
         self._requested_index = None
         self._single_scroll_transition = None
 
         self.scroll_reader.set_images(self.image_list, start_index=requested_index)
         res = self._request_index(requested_index, force=True)
         self._hud.set_page_info(requested_index, len(self.image_list))
-        self._hud.set_mode(True)
+        self._hud.set_mode(False)
         self._hud.reposition(self.width(), self.height())
         self._hud.hide_immediately()
         return res

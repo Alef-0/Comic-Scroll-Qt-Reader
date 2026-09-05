@@ -10,8 +10,12 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
-from .main_window import MainWindow
-from .resources import APP_ICON_PATH, APP_NAME
+if __package__:
+    from .main_window import MainWindow
+    from .resources import APP_ICON_PATH, APP_NAME
+else:
+    from comic_scroll_reader.main_window import MainWindow
+    from comic_scroll_reader.resources import APP_ICON_PATH, APP_NAME
 
 
 def parse_arguments(args=None):
@@ -43,7 +47,10 @@ def main():
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationDisplayName(APP_NAME)
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
+    app.setDesktopFileName("comic-scroll-reader.desktop")
+
+    app_icon = QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.exists() else QIcon.fromTheme("comic-scroll-reader")
+    app.setWindowIcon(app_icon)
 
     # Enable terminal interrupt (Ctrl+C) handling
     signal.signal(signal.SIGINT, lambda *_: app.quit())

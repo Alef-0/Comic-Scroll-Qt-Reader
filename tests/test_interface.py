@@ -375,8 +375,8 @@ class TestMainWindowInterface(unittest.TestCase):
 
         window.deleteLater()
 
-    def test_drop_folder_loads_images_and_switches_to_scroll_mode(self):
-        """Dropping a folder loads all images and switches stack from welcome widget to scroll reader."""
+    def test_drop_folder_loads_images_and_switches_to_viewer(self):
+        """Dropping a folder loads all images and switches stack from welcome widget to image viewer."""
         window = MainWindow()
         self.assertIs(window._stack.currentWidget(), window.welcome_widget)
 
@@ -384,7 +384,7 @@ class TestMainWindowInterface(unittest.TestCase):
         window.dropEvent(drop_ev)
 
         self.assertEqual(len(window.image_list), 3)
-        self.assertIs(window._stack.currentWidget(), window.scroll_reader)
+        self.assertIs(window._stack.currentWidget(), window.image_viewer)
         self.assertIn("cover.png", window.windowTitle())
         window.deleteLater()
 
@@ -405,7 +405,7 @@ class TestMainWindowInterface(unittest.TestCase):
         """Calling close_current clears state and displays welcome widget."""
         window = MainWindow(target_path=self.temp_dir)
         self.assertEqual(len(window.image_list), 3)
-        self.assertIs(window._stack.currentWidget(), window.scroll_reader)
+        self.assertIs(window._stack.currentWidget(), window.image_viewer)
 
         window.close_current()
         self.assertEqual(len(window.image_list), 0)

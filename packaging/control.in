@@ -1,0 +1,20 @@
+Package: comic-scroll-reader
+Version: 1.0.0
+Section: graphics
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Alef-0 <alefgabryel123@gmail.com>
+Homepage: https://github.com/Alef-0/Comic-Scroll-Qt-Reader
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6 (>= 2.34), libgl1, libx11-6, libxcb1, libxkbcommon0, zlib1g
+Description: Fast continuous scroll and single-page reader for comics, manga, and PDFs
+ Comic Scroll Reader is a modern desktop viewer designed specifically for
+ reading comic folders, webtoons, manga, and PDF documents.
+ .
+ Features:
+  - Continuous vertical scroll mode with seamless page stitching
+  - Single page mode with anchored fit-to-width, fit-to-height, and zoom
+  - High-performance asynchronous image pipeline
+  - Memory-bounded on-demand PDF rendering powered by Google PDFium
+  - Comprehensive keyboard and mouse navigation
+  - Distraction-free dark user interface with auto-hiding HUD

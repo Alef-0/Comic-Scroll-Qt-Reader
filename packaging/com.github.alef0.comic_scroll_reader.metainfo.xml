@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.alef0.comic_scroll_reader</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Comic Scroll Reader</name>
+  <summary>Continuous scroll and single-page reader for comics, image folders, and PDFs</summary>
+  <description>
+    <p>
+      Comic Scroll Reader is a fast, purpose-built desktop reader designed specifically for comics, manga, webtoons, and image collections.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Continuous vertical scroll mode with seamless page stitching and boundary traversal</li>
+      <li>Single-page view with fit-to-width, fit-to-height, and smooth anchored zoom</li>
+      <li>High-performance asynchronous image pipeline for instant decoding and low memory footprint</li>
+      <li>Fast, on-demand PDF document rendering powered by Google PDFium</li>
+      <li>Comprehensive keyboard and mouse shortcuts, fullscreen mode, and auto-hiding HUD</li>
+      <li>Folder and archive browsing with natural numerical sorting</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">comic-scroll-reader.desktop</launchable>
+  <url type="homepage">https://github.com/Alef-0/Comic-Scroll-Qt-Reader</url>
+  <developer_name>Alef-0</developer_name>
+  <provides>
+    <binary>comic-scroll-reader</binary>
+  </provides>
+  <releases>
+    <release version="1.0.0" date="2026-09-05">
+      <description>
+        <p>Initial stable 1.0 release of Comic Scroll Reader with full PDF and image folder reading support.</p>
+      </description>
+    </release>
+  </releases>
+</component>

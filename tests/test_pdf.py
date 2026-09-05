@@ -378,30 +378,31 @@ def test_scroll_reader_pdf(qapp: QApplication, sample_pdf: str):
 
 
 def test_main_window_open_pdf(qapp: QApplication, sample_pdf: str):
-    """Verify MainWindow opens a PDF by default in Scroll Mode with correct page count."""
+    """Verify MainWindow opens a PDF by default in Single Page Mode with correct page count."""
     window = MainWindow(target_path=sample_pdf)
     window.resize(1280, 720)
 
-    # Must open by default on scroll mode
-    assert window.viewer_mode == ViewerMode.SCROLL
+    # Must open by default on single page mode
+    assert window.viewer_mode == ViewerMode.SINGLE
     assert len(window.image_list) == 3
     assert window.current_index in (0, -1)  # -1 before preview decoded, 0 committed
 
     # Title contains PDF filename and page
     window.update_title()
     title = window.windowTitle()
-    assert "Comic Scroll Reader [Scroll]" in title
+    assert "Comic Scroll Reader" in title
+    assert "[Scroll]" not in title
     assert os.path.basename(sample_pdf) in title
 
-    # Navigation in scroll mode
+    # Navigation
     window.go_to_index(1)
     assert window._requested_index == 1 or window.current_index == 1
 
-    # Switch to Single mode
-    window.set_mode(ViewerMode.SINGLE)
-    assert window.viewer_mode == ViewerMode.SINGLE
+    # Switch to Scroll mode
+    window.set_mode(ViewerMode.SCROLL)
+    assert window.viewer_mode == ViewerMode.SCROLL
     window.update_title()
-    assert "[Scroll]" not in window.windowTitle()
+    assert "[Scroll]" in window.windowTitle()
 
     # Next / Prev navigation
     window.current_index = 0
@@ -412,9 +413,9 @@ def test_main_window_open_pdf(qapp: QApplication, sample_pdf: str):
     window.first_image()
     assert window._requested_index == 0 or window.current_index == 0
 
-    # Toggle mode back to Scroll
+    # Toggle mode back to Single
     window.toggle_mode()
-    assert window.viewer_mode == ViewerMode.SCROLL
+    assert window.viewer_mode == ViewerMode.SINGLE
 
     window.close()
 
