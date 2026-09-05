@@ -5,7 +5,8 @@ import re
 import sys
 from typing import List, Optional
 
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QMessageBox
+from enum import Enum
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QMessageBox, QStackedWidget
 from PyQt6.QtGui import (
     QColor,
     QKeyEvent,
@@ -17,13 +18,31 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QRect, QPointF, QSize, QTimer, pyqtSignal
 
-# Import controls handlers
+# Import controls handlers, scroll reader, and single viewer
 try:
-    from src.controls.events import KeyboardEventHandler, MouseEventHandler
+    from src.controls.events import (
+        CommonViewerControls,
+        KeyboardEventHandler,
+        MouseEventHandler,
+    )
     from src.image_pipeline import DecodeResult, ImagePipeline
+    from src.scroll_reader import ScrollReaderWidget
+    from src.single_viewer import ImageViewerWidget, ScaledImageLabel
 except ImportError:
-    from controls.events import KeyboardEventHandler, MouseEventHandler
+    from controls.events import (
+        CommonViewerControls,
+        KeyboardEventHandler,
+        MouseEventHandler,
+    )
     from image_pipeline import DecodeResult, ImagePipeline
+    from scroll_reader import ScrollReaderWidget
+    from single_viewer import ImageViewerWidget, ScaledImageLabel
+
+
+
+class ViewerMode(Enum):
+    SINGLE = "single"
+    SCROLL = "scroll"
 
 SUPPORTED_EXTENSIONS = {
     ".png",
@@ -50,348 +69,16 @@ def natural_sort_key(file_path: str) -> list:
     ]
 
 
-class ImageViewerWidget(QWidget):
-    """Custom QWidget that uses QPainter to dynamically draw, scale, zoom, and pan
-    its image while strictly preserving aspect ratio.
-    """
 
-    next_image_requested = pyqtSignal()
-    prev_image_requested = pyqtSignal()
-    zoom_changed = pyqtSignal(float)
-    preview_size_requested = pyqtSignal(QSize)
-    full_resolution_requested = pyqtSignal()
-
-    MIN_ZOOM = 0.1
-    MAX_ZOOM = 50.0
-    QUALITY_DELAY_MS = 100
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumSize(1, 1)  # Allows window to shrink freely without getting blocked
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
-        self._preview_pixmap: Optional[QPixmap] = None
-        self._full_pixmap: Optional[QPixmap] = None
-        self._source_size = QSize()
-        self._image_path: Optional[str] = None
-        self._zoom_factor: float = 1.0
-        self._pan_offset: QPointF = QPointF(0.0, 0.0)
-        self._interactive_transform = False
-
-        self._quality_timer = QTimer(self)
-        self._quality_timer.setSingleShot(True)
-        self._quality_timer.setInterval(self.QUALITY_DELAY_MS)
-        self._quality_timer.timeout.connect(self._finish_interaction)
-
-        # Delegate mouse events to MouseEventHandler
-        self._mouse_handler = MouseEventHandler(
-            on_pan=self.pan_by,
-            on_zoom_anchor=self.zoom_at,
-            on_next_image=self.next_image_requested.emit,
-            on_prev_image=self.prev_image_requested.emit,
-            on_reset_view=self.reset_view,
-            on_cursor_change=self.setCursor,
-        )
-
-    @property
-    def zoom_factor(self) -> float:
-        """Return the current zoom factor (1.0 = fit to window)."""
-        return self._zoom_factor
-
-    @property
-    def pan_offset(self) -> QPointF:
-        """Return current pan offset from center."""
-        return self._pan_offset
-
-    def set_pixmap(self, pixmap: QPixmap):
-        """Set an already-loaded pixmap directly, primarily for embedded callers."""
-        self._preview_pixmap = pixmap
-        self._full_pixmap = pixmap
-        self._source_size = pixmap.size()
-        self._image_path = None
-        self.reset_view()
-
-    def pixmap(self) -> Optional[QPixmap]:
-        """Return the pixels currently selected for painting."""
-        return self._active_pixmap()
-
-    @property
-    def source_size(self) -> QSize:
-        """Return original file dimensions, independent of preview resolution."""
-        return QSize(self._source_size)
-
-    @property
-    def image_path(self) -> Optional[str]:
-        return self._image_path
-
-    def preview_bounds(self) -> QSize:
-        """Return viewport dimensions in physical pixels for preview decoding."""
-        dpr = self.devicePixelRatioF()
-        return QSize(
-            max(1, int(round(self.width() * dpr))),
-            max(1, int(round(self.height() * dpr))),
-        )
-
-    def set_preview_pixmap(
-        self,
-        pixmap: QPixmap,
-        source_size: QSize,
-        image_path: str,
-        reset_view: bool = True,
-    ) -> None:
-        """Atomically replace the display preview without retaining the old full image."""
-        self._preview_pixmap = pixmap
-        self._full_pixmap = None
-        self._source_size = QSize(source_size)
-        self._image_path = image_path
-        self._interactive_transform = False
-        if reset_view:
-            self.reset_view()
-            if not self._full_resolution_needed():
-                self._quality_timer.stop()
-        else:
-            self.update()
-
-    def set_refined_preview_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
-        """Replace only the small render surface while preserving zoom and pan."""
-        if image_path != self._image_path:
-            return
-        self._preview_pixmap = pixmap
-        if self._zoom_factor <= 1.0:
-            self._full_pixmap = None
-        self.update()
-
-    def set_full_resolution_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
-        """Install full pixels for detailed zoom without changing view geometry."""
-        if image_path != self._image_path:
-            return
-        self._full_pixmap = pixmap
-        self.update()
-
-    def release_full_resolution(self) -> None:
-        """Drop the large buffer while retaining the small transition preview."""
-        self._full_pixmap = None
-        self.update()
-
-    def clear(self):
-        """Clear current image and repaint empty canvas."""
-        self._preview_pixmap = None
-        self._full_pixmap = None
-        self._source_size = QSize()
-        self._image_path = None
-        self._quality_timer.stop()
-        self.reset_view()
-
-    def reset_view(self):
-        """Reset zoom factor and pan offset back to centered fit-to-window."""
-        self._zoom_factor = 1.0
-        self._pan_offset = QPointF(0.0, 0.0)
-        self._full_pixmap = None
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.update()
-        self.zoom_changed.emit(self._zoom_factor)
-        self._schedule_quality_update()
-
-    def pan_by(self, delta_x: float, delta_y: float):
-        """Translate the image by a given delta offset."""
-        self._pan_offset += QPointF(delta_x, delta_y)
-        self._begin_interaction()
-        self.update()
-
-    def zoom_at(self, scale_factor: float, anchor_pos: Optional[QPointF] = None):
-        """Zoom in or out anchored around a specific widget coordinate, preserving aspect ratio."""
-        if not self._has_image():
-            return
-
-        w_size = self.size()
-        if w_size.width() <= 0 or w_size.height() <= 0:
-            return
-
-        base_size = self._source_size.scaled(
-            w_size, Qt.AspectRatioMode.KeepAspectRatio
-        )
-        base_w = base_size.width()
-        base_h = base_size.height()
-        if base_w <= 0 or base_h <= 0:
-            return
-
-        cur_w = base_w * self._zoom_factor
-        cur_h = base_h * self._zoom_factor
-        cur_x = (w_size.width() - cur_w) / 2.0 + self._pan_offset.x()
-        cur_y = (w_size.height() - cur_h) / 2.0 + self._pan_offset.y()
-
-        if anchor_pos is None:
-            ax = w_size.width() / 2.0
-            ay = w_size.height() / 2.0
-        else:
-            ax = anchor_pos.x()
-            ay = anchor_pos.y()
-
-        # Normalized coordinates relative to the current image rectangle
-        fx = (ax - cur_x) / cur_w
-        fy = (ay - cur_y) / cur_h
-
-        new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self._zoom_factor * scale_factor))
-        if abs(new_zoom - self._zoom_factor) < 1e-6:
-            return
-
-        new_w = base_w * new_zoom
-        new_h = base_h * new_zoom
-
-        # Maintain anchor point stationary
-        new_x = ax - fx * new_w
-        new_y = ay - fy * new_h
-
-        new_pan_x = new_x - (w_size.width() - new_w) / 2.0
-        new_pan_y = new_y - (w_size.height() - new_h) / 2.0
-
-        self._zoom_factor = new_zoom
-        self._pan_offset = QPointF(new_pan_x, new_pan_y)
-        self._begin_interaction()
-
-        # Update cursor shape when zoomed in
-        if not self._mouse_handler.is_dragging:
-            self.setCursor(
-                Qt.CursorShape.OpenHandCursor
-                if self._zoom_factor > 1.0
-                else Qt.CursorShape.ArrowCursor
-            )
-
-        self.update()
-        self.zoom_changed.emit(self._zoom_factor)
-
-    def zoom_in(self):
-        """Zoom in centered on widget."""
-        self.zoom_at(1.25)
-
-    def zoom_out(self):
-        """Zoom out centered on widget."""
-        self.zoom_at(0.8)
-
-    def target_rect(self) -> QRect:
-        """Calculate the target rectangle of the image within widget bounds,
-        accounting for zoom and pan while preserving aspect ratio.
-        """
-        if not self._has_image():
-            return QRect()
-
-        widget_size = self.size()
-        if widget_size.width() <= 0 or widget_size.height() <= 0:
-            return QRect()
-
-        base_size = self._source_size.scaled(
-            widget_size, Qt.AspectRatioMode.KeepAspectRatio
-        )
-        w = base_size.width() * self._zoom_factor
-        h = base_size.height() * self._zoom_factor
-        x = (widget_size.width() - w) / 2.0 + self._pan_offset.x()
-        y = (widget_size.height() - h) / 2.0 + self._pan_offset.y()
-
-        return QRect(int(round(x)), int(round(y)), int(round(w)), int(round(h)))
-
-    def paintEvent(self, event):
-        """Draw one complete buffered frame using the cheapest suitable pixel source."""
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#1a1a1a"))
-
-        pixmap = self._active_pixmap()
-        if (
-            pixmap is not None
-            and not pixmap.isNull()
-            and self.width() > 0
-            and self.height() > 0
-        ):
-            painter.setRenderHint(
-                QPainter.RenderHint.SmoothPixmapTransform,
-                not self._interactive_transform,
-            )
-            rect = self.target_rect()
-            if not rect.isEmpty():
-                painter.drawPixmap(rect, pixmap)
-
-    def resizeEvent(self, event: QResizeEvent):
-        super().resizeEvent(event)
-        if self._has_image():
-            self._begin_interaction()
-
-    def _has_image(self) -> bool:
-        return (
-            self._preview_pixmap is not None
-            and not self._preview_pixmap.isNull()
-            and self._source_size.isValid()
-        )
-
-    def _required_pixel_size(self) -> QSize:
-        rect = self.target_rect()
-        dpr = self.devicePixelRatioF()
-        return QSize(
-            max(1, int(round(rect.width() * dpr))),
-            max(1, int(round(rect.height() * dpr))),
-        )
-
-    def _full_resolution_needed(self) -> bool:
-        if not self._has_image():
-            return False
-        required = self._required_pixel_size()
-        preview_size = self._preview_pixmap.size()
-        return (
-            required.width() > preview_size.width()
-            or required.height() > preview_size.height()
-        ) and (
-            self._source_size.width() > preview_size.width()
-            or self._source_size.height() > preview_size.height()
-        )
-
-    def _active_pixmap(self) -> Optional[QPixmap]:
-        if self._full_pixmap is not None and self._full_resolution_needed():
-            return self._full_pixmap
-        return self._preview_pixmap
-
-    def _begin_interaction(self) -> None:
-        self._interactive_transform = True
-        self._quality_timer.start()
-
-    def _schedule_quality_update(self) -> None:
-        if self._has_image() and self._image_path:
-            self._quality_timer.start()
-
-    def _finish_interaction(self) -> None:
-        self._interactive_transform = False
-        self.update()
-        if not self._has_image() or not self._image_path:
-            return
-        if self._zoom_factor <= 1.0:
-            self.preview_size_requested.emit(self.preview_bounds())
-        elif self._full_pixmap is None and self._full_resolution_needed():
-            self.full_resolution_requested.emit()
-
-    # Mouse and wheel event handlers delegated to MouseEventHandler
-    def mousePressEvent(self, event: QMouseEvent):
-        if not self._mouse_handler.handle_mouse_press(event):
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if not self._mouse_handler.handle_mouse_move(event):
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        if not self._mouse_handler.handle_mouse_release(
-            event, is_zoomed=(self._zoom_factor > 1.0)
-        ):
-            super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        if not self._mouse_handler.handle_double_click(event):
-            super().mouseDoubleClickEvent(event)
-
-    def wheelEvent(self, event: QWheelEvent):
-        if not self._mouse_handler.handle_wheel(event):
-            super().wheelEvent(event)
-
-
-# Backwards compatibility alias
-ScaledImageLabel = ImageViewerWidget
+__all__ = [
+    "ImageViewerWidget",
+    "ScaledImageLabel",
+    "ScrollReaderWidget",
+    "MainWindow",
+    "ViewerMode",
+    "SUPPORTED_EXTENSIONS",
+    "natural_sort_key",
+]
 
 
 class MainWindow(QMainWindow):
@@ -417,11 +104,28 @@ class MainWindow(QMainWindow):
         self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self.setMinimumSize(320, 180)
 
-        # Image viewer as central widget
+        # Image pipeline shared across both viewer widgets
+        self._image_pipeline = ImagePipeline(self)
+        self._image_pipeline.image_ready.connect(self._on_image_ready)
+        self._image_pipeline.image_failed.connect(self._on_image_failed)
+
+        # Mode 1: Single image viewer
         self.image_viewer = ImageViewerWidget(self)
         self.viewer = self.image_viewer
         self.image_label = self.image_viewer  # Backwards compatibility alias
-        self.setCentralWidget(self.image_viewer)
+
+        # Mode 2: Continuous scroll reader
+        self.scroll_reader = ScrollReaderWidget(self, pipeline=self._image_pipeline)
+
+        # Central widget stack supporting both modes
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self.image_viewer)
+        self._stack.addWidget(self.scroll_reader)
+        self.setCentralWidget(self._stack)
+
+        # Initial mode: Scroll reader mode
+        self.viewer_mode = ViewerMode.SCROLL
+        self._stack.setCurrentWidget(self.scroll_reader)
 
         # Connect image viewer signals
         self.image_viewer.next_image_requested.connect(self.next_image)
@@ -433,10 +137,14 @@ class MainWindow(QMainWindow):
         self.image_viewer.full_resolution_requested.connect(
             self._request_full_resolution
         )
+        self.image_viewer.toggle_mode_requested.connect(self.toggle_mode)
 
-        self._image_pipeline = ImagePipeline(self)
-        self._image_pipeline.image_ready.connect(self._on_image_ready)
-        self._image_pipeline.image_failed.connect(self._on_image_failed)
+        # Connect scroll reader signals
+        self.scroll_reader.visible_image_changed.connect(self._on_scroll_visible_changed)
+        self.scroll_reader.zoom_changed.connect(lambda _: self.update_title())
+        self.scroll_reader.toggle_mode_requested.connect(self.toggle_mode)
+        self.scroll_reader.mode_single_requested.connect(lambda: self.set_mode(ViewerMode.SINGLE))
+        self.scroll_reader.mode_scroll_requested.connect(lambda: self.set_mode(ViewerMode.SCROLL))
 
         # Keyboard event handler
         self._keyboard_handler = KeyboardEventHandler(
@@ -444,9 +152,12 @@ class MainWindow(QMainWindow):
             on_prev_image=self.prev_image,
             on_first_image=self.first_image,
             on_last_image=self.last_image,
-            on_zoom_in=self.image_viewer.zoom_in,
-            on_zoom_out=self.image_viewer.zoom_out,
-            on_reset_zoom=self.image_viewer.reset_view,
+            on_zoom_in=self._zoom_in,
+            on_zoom_out=self._zoom_out,
+            on_reset_zoom=self._reset_zoom,
+            on_mode_single=lambda: self.set_mode(ViewerMode.SINGLE),
+            on_mode_scroll=lambda: self.set_mode(ViewerMode.SCROLL),
+            on_toggle_mode=self.toggle_mode,
         )
 
         # Image folder discovery state
@@ -466,6 +177,54 @@ class MainWindow(QMainWindow):
                 self.discover_images(resolved)
             else:
                 self.discover_images(os.path.dirname(resolved), initial_file=resolved)
+
+    def set_mode(self, mode: ViewerMode) -> None:
+        """Switch between Single Image mode and Scroll Reader mode, synchronizing current image."""
+        if self.viewer_mode == mode:
+            return
+
+        self.viewer_mode = mode
+        if mode == ViewerMode.SINGLE:
+            # Sync active index from scroll reader to single image viewer
+            idx = self.scroll_reader.current_visible_index()
+            if 0 <= idx < len(self.image_list):
+                self.current_index = idx
+                self._request_index(idx, force=True)
+            self._stack.setCurrentWidget(self.image_viewer)
+            self.image_viewer.setFocus()
+        elif mode == ViewerMode.SCROLL:
+            # Sync active index from single image viewer to scroll reader
+            self._stack.setCurrentWidget(self.scroll_reader)
+            self.scroll_reader.setFocus()
+            if 0 <= self.current_index < len(self.image_list):
+                self.scroll_reader.scroll_to_index(self.current_index)
+
+        self.update_title()
+
+    def toggle_mode(self) -> None:
+        """Alternate between Single Image and Scroll Reader modes."""
+        if self.viewer_mode == ViewerMode.SCROLL:
+            self.set_mode(ViewerMode.SINGLE)
+        else:
+            self.set_mode(ViewerMode.SCROLL)
+
+    def _on_scroll_visible_changed(self, index: int) -> None:
+        """Update current index and title when scrolling in Scroll Reader mode."""
+        if self.viewer_mode == ViewerMode.SCROLL and 0 <= index < len(self.image_list):
+            self.current_index = index
+            self.update_title()
+
+    def _zoom_in(self) -> None:
+        self.image_viewer.zoom_in()
+        self.scroll_reader.zoom_in()
+
+    def _zoom_out(self) -> None:
+        self.image_viewer.zoom_out()
+        self.scroll_reader.zoom_out()
+
+    def _reset_zoom(self) -> None:
+        self.image_viewer.reset_view()
+        self.scroll_reader.reset_zoom()
 
     def discover_images(
         self, folder_path: str, initial_file: Optional[str] = None
@@ -507,9 +266,11 @@ class MainWindow(QMainWindow):
         self._requested_index = None
 
         if self.image_list and requested_index >= 0:
+            self.scroll_reader.set_images(self.image_list, start_index=requested_index)
             return self._request_index(requested_index, force=True)
         else:
             self.image_viewer.clear()
+            self.scroll_reader.clear()
             self.update_title()
             return False
 
@@ -529,6 +290,7 @@ class MainWindow(QMainWindow):
         )
         if not self.image_list or not (0 <= index < len(self.image_list)):
             self.image_viewer.clear()
+            self.scroll_reader.clear()
             self.update_title()
             return False
         return self._request_index(index, force=True)
@@ -539,11 +301,13 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("Qt Scroll Reader - [0/0] No images found")
             return
 
+        mode_tag = " [Scroll]" if self.viewer_mode == ViewerMode.SCROLL else ""
+
         if self._requested_index is not None:
             path = self.image_list[self._requested_index]
             filename = os.path.basename(path)
             self.setWindowTitle(
-                f"Qt Scroll Reader - [{self._requested_index + 1}/{len(self.image_list)}] "
+                f"Qt Scroll Reader{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
                 f"Loading {filename}…"
             )
             return
@@ -561,11 +325,17 @@ class MainWindow(QMainWindow):
             else ""
         )
 
-        zoom_pct = int(round(self.image_viewer.zoom_factor * 100))
+        if self.viewer_mode == ViewerMode.SCROLL:
+            mode_tag = " [Scroll]"
+            zoom_pct = int(round(self.scroll_reader.zoom_factor * 100))
+        else:
+            mode_tag = ""
+            zoom_pct = int(round(self.image_viewer.zoom_factor * 100))
+
         zoom_str = f" - {zoom_pct}%" if zoom_pct != 100 else ""
 
         self.setWindowTitle(
-            f"Qt Scroll Reader - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
+            f"Qt Scroll Reader{mode_tag} - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
         )
 
     def next_image(self):
@@ -639,6 +409,8 @@ class MainWindow(QMainWindow):
             accepted_index = self._requested_index
             self.current_index = accepted_index
             self._requested_index = None
+            if self.viewer_mode == ViewerMode.SCROLL:
+                self.scroll_reader.scroll_to_index(accepted_index)
             pixmap = QPixmap.fromImage(result.image)
             self.image_viewer.set_preview_pixmap(
                 pixmap, result.source_size, request.path, reset_view=True
@@ -757,4 +529,7 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard navigation and shortcuts."""
         if not self._keyboard_handler.handle_key_press(event):
-            super().keyPressEvent(event)
+            if self.viewer_mode == ViewerMode.SCROLL:
+                self.scroll_reader.keyPressEvent(event)
+            else:
+                super().keyPressEvent(event)

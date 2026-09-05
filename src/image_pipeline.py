@@ -139,10 +139,13 @@ class _DecodeWorker(QRunnable):
                 if swapped_orientation_error < same_orientation_error:
                     source_size.transpose()
 
-        self.signals.finished.emit(
-            self.worker_id,
-            DecodeResult(self.request, image, QSize(source_size), error),
-        )
+        try:
+            self.signals.finished.emit(
+                self.worker_id,
+                DecodeResult(self.request, image, QSize(source_size), error),
+            )
+        except RuntimeError:
+            pass
 
 
 class ImagePipeline(QObject):
@@ -189,6 +192,18 @@ class ImagePipeline(QObject):
     def retain_preview_paths(self, paths: set[str]) -> None:
         self.preview_cache.retain_paths({os.path.abspath(path) for path in paths})
 
+    def _safe_emit_failed(self, result: DecodeResult) -> None:
+        try:
+            self.image_failed.emit(result)
+        except RuntimeError:
+            pass
+
+    def _safe_emit_ready(self, result: DecodeResult) -> None:
+        try:
+            self.image_ready.emit(result)
+        except RuntimeError:
+            pass
+
     def _request(
         self,
         path: str,
@@ -206,7 +221,7 @@ class ImagePipeline(QObject):
                 request_id, absolute_path, purpose, bounds, (absolute_path,)
             )
             result = DecodeResult(request, QImage(), QSize(), str(error))
-            QTimer.singleShot(0, lambda result=result: self.image_failed.emit(result))
+            QTimer.singleShot(0, lambda result=result: self._safe_emit_failed(result))
             return
 
         size_key = None if bounds is None else (bounds.width(), bounds.height())
@@ -221,7 +236,7 @@ class ImagePipeline(QObject):
                 result = DecodeResult(
                     request, cached.image, QSize(cached.source_size)
                 )
-                QTimer.singleShot(0, lambda result=result: self.image_ready.emit(result))
+                QTimer.singleShot(0, lambda result=result: self._safe_emit_ready(result))
                 return
 
         if cache_key in self._inflight_waiters:
