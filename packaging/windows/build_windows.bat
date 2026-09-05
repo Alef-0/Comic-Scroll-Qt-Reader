@@ -16,7 +16,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo [1/3] Installing / Verifying requirements and PyInstaller...
-call .venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+call .venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller pillow
 
 echo [2/3] Compiling standalone bundle with PyInstaller...
 call .venv\Scripts\python.exe -m PyInstaller ^

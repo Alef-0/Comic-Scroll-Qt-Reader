@@ -24,7 +24,7 @@ if [ -f "$PROJECT_ROOT/.venv/bin/python" ]; then
 fi
 
 echo "[1/3] Ensuring dependencies..."
-"$PYTHON_BIN" -m pip install -r "$PROJECT_ROOT/requirements.txt" pyinstaller
+"$PYTHON_BIN" -m pip install -r "$PROJECT_ROOT/requirements.txt" pyinstaller pillow
 
 echo "[2/3] Compiling .app bundle with PyInstaller..."
 "$PYTHON_BIN" -m PyInstaller \

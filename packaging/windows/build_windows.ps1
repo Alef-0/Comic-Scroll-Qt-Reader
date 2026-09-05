@@ -14,7 +14,7 @@ if (-not (Test-Path $Python)) {
 }
 
 Write-Host "[1/3] Verifying dependencies..." -ForegroundColor Yellow
-& $Python -m pip install -r requirements.txt pyinstaller
+& $Python -m pip install -r requirements.txt pyinstaller pillow
 
 Write-Host "[2/3] Compiling standalone bundle with PyInstaller..." -ForegroundColor Yellow
 & $Python -m PyInstaller `

@@ -5,18 +5,7 @@
 <h1 align="center">Comic Scroll Reader</h1>
 
 <p align="center">
-  <b>A sleek, high-performance desktop reader for comic folders, webtoons, manga, and PDF documents.</b>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version 1.0.0" />
-  <img src="https://img.shields.io/badge/Python-3.10+-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10+" />
-  <img src="https://img.shields.io/badge/GUI-PyQt6-41CD52.svg?logo=qt&logoColor=white" alt="PyQt6" />
-  <img src="https://img.shields.io/badge/PDF_Engine-Google_PDFium-EA4335.svg" alt="PDF Engine" />
-  <img src="https://img.shields.io/badge/Linux-.deb%20%7C%20.rpm-A81D33.svg?logo=linux&logoColor=white" alt="Linux Packages" />
-  <img src="https://img.shields.io/badge/Windows-.exe_setup-0078D6.svg?logo=windows&logoColor=white" alt="Windows Setup" />
-  <img src="https://img.shields.io/badge/macOS-.dmg-000000.svg?logo=apple&logoColor=white" alt="macOS DMG" />
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License MIT" />
+  <b>Desktop reader for comic folders, webtoons, manga, and PDF documents.</b>
 </p>
 
 ---

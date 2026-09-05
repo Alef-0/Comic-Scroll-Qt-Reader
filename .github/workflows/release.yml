@@ -58,7 +58,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pyinstaller pillow
 
       - name: Build Windows Installer
         run: |
@@ -85,7 +85,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pyinstaller pillow
 
       - name: Build macOS DMG
         run: |

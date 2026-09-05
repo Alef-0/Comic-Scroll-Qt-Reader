@@ -8,6 +8,7 @@ ROOT_DIR = Path.cwd()
 
 datas = [
     (str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.png'), 'comic_scroll_reader/assets'),
+    (str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.icns'), 'comic_scroll_reader/assets'),
 ]
 binaries = []
 hiddenimports = [
@@ -77,7 +78,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.png'),
+    icon=None,
 )
 
 coll = COLLECT(
@@ -93,7 +94,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='Comic Scroll Reader.app',
-    icon=str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.png'),
+    icon=str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.icns'),
     bundle_identifier='com.github.alef0.comic-scroll-reader',
     info_plist={
         'CFBundleDisplayName': 'Comic Scroll Reader',

@@ -8,6 +8,7 @@ ROOT_DIR = Path.cwd()
 
 datas = [
     (str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.png'), 'comic_scroll_reader/assets'),
+    (str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.ico'), 'comic_scroll_reader/assets'),
 ]
 binaries = []
 hiddenimports = [
@@ -77,7 +78,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.png'),
+    icon=str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.ico'),
 )
 
 coll = COLLECT(

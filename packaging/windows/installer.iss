@@ -21,6 +21,7 @@ AllowNoIcons=yes
 LicenseFile=..\copyright
 OutputDir=..\..\dist
 OutputBaseFilename=comic-scroll-reader-{#MyAppVersion}-setup
+SetupIconFile=..\..\comic_scroll_reader\assets\csr_app_icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
