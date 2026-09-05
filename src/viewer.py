@@ -6,9 +6,22 @@ import sys
 from typing import List, Optional
 
 from enum import Enum
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QMessageBox, QStackedWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QMainWindow,
+    QMessageBox,
+    QStackedWidget,
+    QWidget,
+)
 from PyQt6.QtGui import (
+    QAction,
     QColor,
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -16,7 +29,7 @@ from PyQt6.QtGui import (
     QResizeEvent,
     QWheelEvent,
 )
-from PyQt6.QtCore import Qt, QRect, QPointF, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QRect, QPointF, QSize, QTimer, pyqtSignal
 
 # Import controls handlers, scroll reader, and single viewer
 try:
@@ -25,6 +38,8 @@ try:
         KeyboardEventHandler,
         MouseEventHandler,
     )
+    from src.about_dialog import AboutDialog
+    from src.hud_overlay import ViewerHud
     from src.image_pipeline import DecodeResult, ImagePipeline
     from src.pdf_handler import (
         build_pdf_page_uri,
@@ -35,12 +50,15 @@ try:
     )
     from src.scroll_reader import ScrollReaderWidget
     from src.single_viewer import ImageViewerWidget, ScaledImageLabel
+    from src.welcome_widget import WelcomeWidget
 except ImportError:
     from controls.events import (
         CommonViewerControls,
         KeyboardEventHandler,
         MouseEventHandler,
     )
+    from about_dialog import AboutDialog
+    from hud_overlay import ViewerHud
     from image_pipeline import DecodeResult, ImagePipeline
     from pdf_handler import (
         build_pdf_page_uri,
@@ -51,6 +69,7 @@ except ImportError:
     )
     from scroll_reader import ScrollReaderWidget
     from single_viewer import ImageViewerWidget, ScaledImageLabel
+    from welcome_widget import WelcomeWidget
 
 
 
@@ -92,6 +111,8 @@ __all__ = [
     "ViewerMode",
     "SUPPORTED_EXTENSIONS",
     "natural_sort_key",
+    "WelcomeWidget",
+    "ViewerHud",
 ]
 
 
@@ -100,8 +121,10 @@ class MainWindow(QMainWindow):
     alphabetical navigation, and zoom/pan controls.
     """
 
-    DEFAULT_WIDTH = 1280
-    DEFAULT_HEIGHT = 720
+    DEFAULT_WIDTH = 580
+    DEFAULT_HEIGHT = 420
+    VIEWER_WIDTH = 1280
+    VIEWER_HEIGHT = 720
     image_loaded = pyqtSignal(str)
     image_load_failed = pyqtSignal(str)
 
@@ -113,10 +136,6 @@ class MainWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.setWindowTitle("Qt Scroll Reader - Image Viewer")
-
-        # Set default 1280x720 resizable window
-        self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
-        self.setMinimumSize(320, 180)
 
         # Image pipeline shared across both viewer widgets
         self._image_pipeline = ImagePipeline(self)
@@ -131,15 +150,22 @@ class MainWindow(QMainWindow):
         # Mode 2: Continuous scroll reader
         self.scroll_reader = ScrollReaderWidget(self, pipeline=self._image_pipeline)
 
-        # Central widget stack supporting both modes
+        # Mode 3 / Empty state: Welcome drop-zone widget
+        self.welcome_widget = WelcomeWidget(self)
+        self.welcome_widget.open_file_requested.connect(self.open_file_dialog)
+        self.welcome_widget.open_folder_requested.connect(self.open_folder_dialog)
+        self.welcome_widget.about_requested.connect(self.show_about_dialog)
+
+        # Central widget stack supporting both modes and welcome state
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self.image_viewer)
         self._stack.addWidget(self.scroll_reader)
+        self._stack.addWidget(self.welcome_widget)
         self.setCentralWidget(self._stack)
 
         # Initial mode: Scroll reader mode
         self.viewer_mode = ViewerMode.SCROLL
-        self._stack.setCurrentWidget(self.scroll_reader)
+        self._stack.setCurrentWidget(self.welcome_widget)
 
         # Connect image viewer signals
         self.image_viewer.next_image_requested.connect(self.next_image)
@@ -160,6 +186,20 @@ class MainWindow(QMainWindow):
         self.scroll_reader.mode_single_requested.connect(lambda: self.set_mode(ViewerMode.SINGLE))
         self.scroll_reader.mode_scroll_requested.connect(lambda: self.set_mode(ViewerMode.SCROLL))
 
+        # Floating bottom HUD overlay
+        self._hud = ViewerHud(self)
+        self._hud.first_clicked.connect(self.first_image)
+        self._hud.prev_clicked.connect(self.prev_image)
+        self._hud.next_clicked.connect(self.next_image)
+        self._hud.last_clicked.connect(self.last_image)
+        self._hud.jump_clicked.connect(self.goto_page_dialog)
+        self._hud.mode_toggled.connect(self.toggle_mode)
+        self._hud.zoom_in_clicked.connect(self._zoom_in)
+        self._hud.zoom_out_clicked.connect(self._zoom_out)
+        self._hud.zoom_reset_clicked.connect(self._reset_zoom)
+        self._hud.fullscreen_toggled.connect(self.toggle_fullscreen)
+        self._hud.hide()
+
         # Keyboard event handler
         self._keyboard_handler = KeyboardEventHandler(
             on_next_image=self.next_image,
@@ -172,7 +212,38 @@ class MainWindow(QMainWindow):
             on_mode_single=lambda: self.set_mode(ViewerMode.SINGLE),
             on_mode_scroll=lambda: self.set_mode(ViewerMode.SCROLL),
             on_toggle_mode=self.toggle_mode,
+            on_fullscreen=self.toggle_fullscreen,
+            on_exit_fullscreen=self._exit_fullscreen_if_active,
+            on_exit=self.close,
+            on_open_file=self.open_file_dialog,
+            on_open_folder=self.open_folder_dialog,
+            on_close_document=self.close_current,
+            on_goto_page=self.goto_page_dialog,
+            on_help=self.show_shortcuts_dialog,
+            on_toggle_hud=self._hud.toggle_pin,
         )
+
+        # Enable drag-and-drop
+        self.setAcceptDrops(True)
+        self._stack.setAcceptDrops(True)
+        self.welcome_widget.setAcceptDrops(True)
+        self.image_viewer.setAcceptDrops(True)
+        self.scroll_reader.setAcceptDrops(True)
+        self.scroll_reader.viewport().setAcceptDrops(True)
+
+        for widget in (
+            self._stack,
+            self.welcome_widget,
+            self.image_viewer,
+            self.scroll_reader,
+            self.scroll_reader.viewport(),
+        ):
+            widget.installEventFilter(self)
+            widget.setMouseTracking(True)
+        self.setMouseTracking(True)
+
+        # Native Menu Bar
+        self._init_menu_bar()
 
         # Image folder discovery / PDF state
         self.folder_path: Optional[str] = None
@@ -188,6 +259,10 @@ class MainWindow(QMainWindow):
         initial_path = target_path or image_path
         if initial_path:
             self.load_image(initial_path)
+        else:
+            self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+            self._stack.setCurrentWidget(self.welcome_widget)
+            self.update_title()
 
     def set_mode(self, mode: ViewerMode) -> None:
         """Switch between Single Image mode and Scroll Reader mode, synchronizing current image."""
@@ -295,11 +370,28 @@ class MainWindow(QMainWindow):
         self._requested_index = None
 
         if self.image_list and requested_index >= 0:
+            self.setMinimumSize(320, 180)
+            self.setMaximumSize(16777215, 16777215)
+            self.resize(self.VIEWER_WIDTH, self.VIEWER_HEIGHT)
+            target_widget = (
+                self.scroll_reader
+                if self.viewer_mode == ViewerMode.SCROLL
+                else self.image_viewer
+            )
+            self._stack.setCurrentWidget(target_widget)
             self.scroll_reader.set_images(self.image_list, start_index=requested_index)
-            return self._request_index(requested_index, force=True)
+            res = self._request_index(requested_index, force=True)
+            self._hud.set_page_info(requested_index, len(self.image_list))
+            self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
+            self._hud.reposition(self.width(), self.height())
+            self._hud.on_user_interaction()
+            return res
         else:
             self.image_viewer.clear()
             self.scroll_reader.clear()
+            self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+            self._stack.setCurrentWidget(self.welcome_widget)
+            self._hud.hide()
             self.update_title()
             return False
 
@@ -321,6 +413,9 @@ class MainWindow(QMainWindow):
         if handler.page_count <= 0:
             self.image_viewer.clear()
             self.scroll_reader.clear()
+            self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+            self._stack.setCurrentWidget(self.welcome_widget)
+            self._hud.hide()
             self.update_title()
             return False
 
@@ -329,6 +424,11 @@ class MainWindow(QMainWindow):
         self.image_list = [
             build_pdf_page_uri(resolved, i) for i in range(handler.page_count)
         ]
+
+        # Unlock sizing for reading view
+        self.setMinimumSize(320, 180)
+        self.setMaximumSize(16777215, 16777215)
+        self.resize(self.VIEWER_WIDTH, self.VIEWER_HEIGHT)
 
         # PDF documents open by default on scroll mode
         self.viewer_mode = ViewerMode.SCROLL
@@ -339,7 +439,12 @@ class MainWindow(QMainWindow):
         self._requested_index = None
 
         self.scroll_reader.set_images(self.image_list, start_index=requested_index)
-        return self._request_index(requested_index, force=True)
+        res = self._request_index(requested_index, force=True)
+        self._hud.set_page_info(requested_index, len(self.image_list))
+        self._hud.set_mode(True)
+        self._hud.reposition(self.width(), self.height())
+        self._hud.on_user_interaction()
+        return res
 
     def load_image(self, image_path: str) -> bool:
         """Load an image file, PDF document, or discover folder images."""
@@ -380,6 +485,8 @@ class MainWindow(QMainWindow):
         """Update window title with [X/Total] counter, filename, dimensions, and zoom."""
         if not self.image_list:
             self.setWindowTitle("Qt Scroll Reader - [0/0] No images found")
+            if hasattr(self, "_hud"):
+                self._hud.hide()
             return
 
         mode_tag = " [Scroll]" if self.viewer_mode == ViewerMode.SCROLL else ""
@@ -391,10 +498,14 @@ class MainWindow(QMainWindow):
                 f"Qt Scroll Reader{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
                 f"Loading {filename}…"
             )
+            if hasattr(self, "_hud"):
+                self._hud.set_page_info(self._requested_index, len(self.image_list))
             return
 
         if not (0 <= self.current_index < len(self.image_list)):
             self.setWindowTitle("Qt Scroll Reader - [0/0] No image displayed")
+            if hasattr(self, "_hud"):
+                self._hud.hide()
             return
 
         path = self.image_list[self.current_index]
@@ -412,16 +523,21 @@ class MainWindow(QMainWindow):
 
         if self.viewer_mode == ViewerMode.SCROLL:
             mode_tag = " [Scroll]"
-            zoom_pct = int(round(self.scroll_reader.zoom_factor * 100))
+            zoom_factor = self.scroll_reader.zoom_factor
         else:
             mode_tag = ""
-            zoom_pct = int(round(self.image_viewer.zoom_factor * 100))
+            zoom_factor = self.image_viewer.zoom_factor
 
+        zoom_pct = int(round(zoom_factor * 100))
         zoom_str = f" - {zoom_pct}%" if zoom_pct != 100 else ""
 
         self.setWindowTitle(
             f"Qt Scroll Reader{mode_tag} - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
         )
+        if hasattr(self, "_hud"):
+            self._hud.set_page_info(self.current_index, len(self.image_list))
+            self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
+            self._hud.set_zoom(zoom_factor)
 
     def next_image(self):
         """Navigate to next image in alphabetical order."""
@@ -625,10 +741,359 @@ class MainWindow(QMainWindow):
         if self._error_dialog is dialog:
             self._error_dialog = None
 
+    def _init_menu_bar(self):
+        menubar = self.menuBar()
+        menubar.setStyleSheet(
+            "QMenuBar { background-color: #222222; color: #e0e0e0; font-size: 13px; }"
+            "QMenuBar::item { background: transparent; padding: 4px 10px; }"
+            "QMenuBar::item:selected { background-color: #383838; color: #ffffff; }"
+            "QMenu { background-color: #2b2b2b; color: #e0e0e0; border: 1px solid #444; }"
+            "QMenu::item { padding: 6px 24px 6px 20px; }"
+            "QMenu::item:selected { background-color: #4a90e2; color: #ffffff; }"
+            "QMenu::separator { height: 1px; background-color: #3d3d3d; margin: 4px 0px; }"
+        )
+
+        # File Menu
+        file_menu = menubar.addMenu("&File")
+
+        open_file_action = QAction("&Open File...", self)
+        open_file_action.setShortcut("Ctrl+O")
+        open_file_action.triggered.connect(self.open_file_dialog)
+        file_menu.addAction(open_file_action)
+
+        open_folder_action = QAction("Open &Folder...", self)
+        open_folder_action.setShortcut("Ctrl+Shift+O")
+        open_folder_action.triggered.connect(self.open_folder_dialog)
+        file_menu.addAction(open_folder_action)
+
+        close_action = QAction("&Close Document", self)
+        close_action.setShortcut("Ctrl+W")
+        close_action.triggered.connect(self.close_current)
+        file_menu.addAction(close_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # View Menu
+        view_menu = menubar.addMenu("&View")
+
+        mode_scroll_action = QAction("Continuous &Scroll Mode", self)
+        mode_scroll_action.setShortcut("2")
+        mode_scroll_action.triggered.connect(lambda: self.set_mode(ViewerMode.SCROLL))
+        view_menu.addAction(mode_scroll_action)
+
+        mode_single_action = QAction("Single &Page Mode", self)
+        mode_single_action.setShortcut("1")
+        mode_single_action.triggered.connect(lambda: self.set_mode(ViewerMode.SINGLE))
+        view_menu.addAction(mode_single_action)
+
+        view_menu.addSeparator()
+
+        zoom_in_action = QAction("Zoom &In", self)
+        zoom_in_action.setShortcut("Ctrl++")
+        zoom_in_action.triggered.connect(self._zoom_in)
+        view_menu.addAction(zoom_in_action)
+
+        zoom_out_action = QAction("Zoom &Out", self)
+        zoom_out_action.setShortcut("Ctrl+-")
+        zoom_out_action.triggered.connect(self._zoom_out)
+        view_menu.addAction(zoom_out_action)
+
+        zoom_reset_action = QAction("&Fit / Reset Zoom", self)
+        zoom_reset_action.setShortcut("Ctrl+0")
+        zoom_reset_action.triggered.connect(self._reset_zoom)
+        view_menu.addAction(zoom_reset_action)
+
+        view_menu.addSeparator()
+
+        fs_action = QAction("Toggle &Fullscreen", self)
+        fs_action.setShortcut("F11")
+        fs_action.triggered.connect(self.toggle_fullscreen)
+        view_menu.addAction(fs_action)
+
+        hud_action = QAction("Toggle &HUD", self)
+        hud_action.setShortcut("H")
+        hud_action.triggered.connect(self._hud.toggle_pin)
+        view_menu.addAction(hud_action)
+
+        # Navigate Menu
+        nav_menu = menubar.addMenu("&Navigate")
+
+        next_action = QAction("&Next Page", self)
+        next_action.setShortcut("Right")
+        next_action.triggered.connect(self.next_image)
+        nav_menu.addAction(next_action)
+
+        prev_action = QAction("&Previous Page", self)
+        prev_action.setShortcut("Left")
+        prev_action.triggered.connect(self.prev_image)
+        nav_menu.addAction(prev_action)
+
+        first_action = QAction("&First Page", self)
+        first_action.setShortcut("Home")
+        first_action.triggered.connect(self.first_image)
+        nav_menu.addAction(first_action)
+
+        last_action = QAction("&Last Page", self)
+        last_action.setShortcut("End")
+        last_action.triggered.connect(self.last_image)
+        nav_menu.addAction(last_action)
+
+        nav_menu.addSeparator()
+
+        goto_action = QAction("&Go to Page...", self)
+        goto_action.setShortcut("Ctrl+G")
+        goto_action.triggered.connect(self.goto_page_dialog)
+        nav_menu.addAction(goto_action)
+
+        # Help Menu
+        help_menu = menubar.addMenu("&Help")
+
+        shortcuts_action = QAction("Keyboard &Shortcuts", self)
+        shortcuts_action.setShortcut("F1")
+        shortcuts_action.triggered.connect(self.show_shortcuts_dialog)
+        help_menu.addAction(shortcuts_action)
+
+        about_action = QAction("&About Qt Scroll Reader", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
+    def _can_accept_drag(self, event) -> bool:
+        mime = event.mimeData()
+        if not mime or not mime.hasUrls():
+            return False
+        for url in mime.urls():
+            if url.isLocalFile():
+                if self._is_supported_drag_path(url.toLocalFile()):
+                    return True
+        return False
+
+    def _extract_valid_drag_path(self, event) -> Optional[str]:
+        mime = event.mimeData()
+        if not mime or not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if url.isLocalFile():
+                local_path = url.toLocalFile()
+                if self._is_supported_drag_path(local_path):
+                    return local_path
+        return None
+
+    def _is_supported_drag_path(self, path: str) -> bool:
+        if not path or not os.path.exists(path):
+            return False
+        if os.path.isdir(path):
+            return True
+        if is_pdf_file(path):
+            return True
+        ext = os.path.splitext(path)[1].lower()
+        return ext in SUPPORTED_EXTENSIONS
+
+    def _set_drag_visual_hover(self, hover: bool):
+        if hasattr(self, "welcome_widget"):
+            self.welcome_widget.set_drag_hover(hover)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if self._can_accept_drag(event):
+            event.acceptProposedAction()
+            self._set_drag_visual_hover(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._can_accept_drag(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        self._set_drag_visual_hover(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent):
+        self._set_drag_visual_hover(False)
+        path = self._extract_valid_drag_path(event)
+        if path:
+            event.acceptProposedAction()
+            self.load_image(path)
+        else:
+            event.ignore()
+
+    def eventFilter(self, watched, event: QEvent) -> bool:
+        etype = event.type()
+        if etype == QEvent.Type.DragEnter:
+            if self._can_accept_drag(event):
+                event.acceptProposedAction()
+                self._set_drag_visual_hover(True)
+                return True
+            else:
+                event.ignore()
+                return True
+        elif etype == QEvent.Type.DragMove:
+            if self._can_accept_drag(event):
+                event.acceptProposedAction()
+                return True
+            else:
+                event.ignore()
+                return True
+        elif etype == QEvent.Type.DragLeave:
+            self._set_drag_visual_hover(False)
+            return True
+        elif etype == QEvent.Type.Drop:
+            self._set_drag_visual_hover(False)
+            path = self._extract_valid_drag_path(event)
+            if path:
+                event.acceptProposedAction()
+                self.load_image(path)
+                return True
+            else:
+                event.ignore()
+                return True
+        elif etype == QEvent.Type.MouseMove:
+            if self.image_list:
+                self._hud.on_user_interaction()
+        return super().eventFilter(watched, event)
+
+    def open_file_dialog(self):
+        """Show open file dialog for images and PDF files."""
+        filter_exts = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
+        file_filter = (
+            f"Supported Files (*.pdf {filter_exts});;"
+            f"PDF Documents (*.pdf);;"
+            f"Images ({filter_exts});;"
+            f"All Files (*)"
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Image or PDF Document",
+            self.folder_path or "",
+            file_filter,
+        )
+        if path:
+            self.load_image(path)
+
+    def open_folder_dialog(self):
+        """Show open directory dialog to read a comic folder."""
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Open Comic Folder",
+            self.folder_path or "",
+        )
+        if dir_path:
+            self.discover_images(dir_path)
+
+    def goto_page_dialog(self):
+        """Prompt user for a page number to jump to."""
+        if not self.image_list:
+            return
+        total = len(self.image_list)
+        current = self.current_index + 1 if self.current_index >= 0 else 1
+        page, ok = QInputDialog.getInt(
+            self,
+            "Go to Page",
+            f"Enter page number (1 - {total}):",
+            value=current,
+            min=1,
+            max=total,
+        )
+        if ok:
+            target_idx = page - 1
+            if self.viewer_mode == ViewerMode.SCROLL:
+                self.scroll_reader.scroll_to_index(target_idx)
+                self.current_index = target_idx
+                self.update_title()
+                self._hud.set_page_info(target_idx, total)
+            else:
+                self.go_to_index(target_idx)
+
+    def show_shortcuts_dialog(self):
+        """Display keyboard and mouse shortcuts reference."""
+        html = """
+        <h3>Keyboard & Mouse Shortcuts</h3>
+        <table border="0" cellpadding="4" cellspacing="2" style="color: #eee;">
+          <tr><td><b>1 / 2</b></td><td>Switch to Single / Continuous Scroll mode</td></tr>
+          <tr><td><b>F11 or F</b></td><td>Toggle Fullscreen</td></tr>
+          <tr><td><b>Esc</b></td><td>Exit Fullscreen</td></tr>
+          <tr><td><b>Ctrl+O</b></td><td>Open Image or PDF File</td></tr>
+          <tr><td><b>Ctrl+Shift+O</b></td><td>Open Comic Folder</td></tr>
+          <tr><td><b>Ctrl+W</b></td><td>Close Current Document</td></tr>
+          <tr><td><b>Ctrl+G</b></td><td>Go to Page...</td></tr>
+          <tr><td><b>H</b></td><td>Toggle Bottom HUD Overlay</td></tr>
+          <tr><td><b>Right / Down / Space / PageDown</b></td><td>Next Page</td></tr>
+          <tr><td><b>Left / Up / PageUp / Backspace</b></td><td>Previous Page</td></tr>
+          <tr><td><b>Home / End</b></td><td>First / Last Page</td></tr>
+          <tr><td><b>Ctrl + Plus / Minus</b></td><td>Zoom In / Out</td></tr>
+          <tr><td><b>Ctrl + 0</b></td><td>Reset Zoom to Fit</td></tr>
+          <tr><td><b>Ctrl + Mouse Wheel</b></td><td>Anchored Zoom In / Out</td></tr>
+          <tr><td><b>Esc</b></td><td>Close Application (Interrupt)</td></tr>
+          <tr><td><b>Ctrl+C</b></td><td>Terminal Interrupt (Close Application)</td></tr>
+          <tr><td><b>Left Click + Drag</b></td><td>Pan Image / Viewport</td></tr>
+          <tr><td><b>Double Click</b></td><td>Reset Zoom / View</td></tr>
+          <tr><td><b>Right Click</b></td><td>Toggle View Mode</td></tr>
+          <tr><td><b>Middle Click</b></td><td>Next Page</td></tr>
+        </table>
+        """
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Shortcuts - Qt Scroll Reader")
+        dialog.setTextFormat(Qt.TextFormat.RichText)
+        dialog.setText(html)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.exec()
+
+    def show_about_dialog(self):
+        """Display the custom project and technology overview."""
+        dialog = AboutDialog(self)
+        dialog.exec()
+
+    def close_current(self):
+        """Close current document or folder and return to welcome screen."""
+        if self.pdf_path:
+            close_pdf_handler(self.pdf_path)
+            self.pdf_path = None
+        self.folder_path = None
+        self.image_list = []
+        self.current_index = -1
+        self._requested_index = None
+        self.image_viewer.clear()
+        self.scroll_reader.clear()
+        self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        self._stack.setCurrentWidget(self.welcome_widget)
+        self._hud.hide()
+        self.update_title()
+
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode on and off."""
+        if self.isFullScreen():
+            self.showNormal()
+            self.menuBar().setVisible(True)
+            self._hud.set_fullscreen(False)
+        else:
+            self.showFullScreen()
+            self.menuBar().setVisible(False)
+            self._hud.set_fullscreen(True)
+        self._hud.reposition(self.width(), self.height())
+        if self.image_list:
+            self._hud.on_user_interaction()
+
+    def _exit_fullscreen_if_active(self):
+        if self.isFullScreen():
+            self.toggle_fullscreen()
+
+    def resizeEvent(self, event: QResizeEvent):
+        super().resizeEvent(event)
+        self._hud.reposition(self.width(), self.height())
+
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard navigation and shortcuts."""
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
         if not self._keyboard_handler.handle_key_press(event):
-            if self.viewer_mode == ViewerMode.SCROLL:
+            if self.viewer_mode == ViewerMode.SCROLL and self.image_list:
                 self.scroll_reader.keyPressEvent(event)
             else:
                 super().keyPressEvent(event)

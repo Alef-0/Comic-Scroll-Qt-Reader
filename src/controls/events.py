@@ -201,6 +201,15 @@ class KeyboardEventHandler:
         on_mode_single: Optional[Callable[[], None]] = None,
         on_mode_scroll: Optional[Callable[[], None]] = None,
         on_toggle_mode: Optional[Callable[[], None]] = None,
+        on_fullscreen: Optional[Callable[[], None]] = None,
+        on_exit_fullscreen: Optional[Callable[[], None]] = None,
+        on_exit: Optional[Callable[[], None]] = None,
+        on_open_file: Optional[Callable[[], None]] = None,
+        on_open_folder: Optional[Callable[[], None]] = None,
+        on_close_document: Optional[Callable[[], None]] = None,
+        on_goto_page: Optional[Callable[[], None]] = None,
+        on_help: Optional[Callable[[], None]] = None,
+        on_toggle_hud: Optional[Callable[[], None]] = None,
     ):
         self.on_next_image = on_next_image
         self.on_prev_image = on_prev_image
@@ -212,14 +221,24 @@ class KeyboardEventHandler:
         self.on_mode_single = on_mode_single
         self.on_mode_scroll = on_mode_scroll
         self.on_toggle_mode = on_toggle_mode
+        self.on_fullscreen = on_fullscreen
+        self.on_exit_fullscreen = on_exit_fullscreen
+        self.on_exit = on_exit
+        self.on_open_file = on_open_file
+        self.on_open_folder = on_open_folder
+        self.on_close_document = on_close_document
+        self.on_goto_page = on_goto_page
+        self.on_help = on_help
+        self.on_toggle_hud = on_toggle_hud
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         """Process key press event. Returns True if handled, False otherwise."""
         modifiers = event.modifiers()
         is_ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        is_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         key = event.key()
 
-        # Zoom keys (with Ctrl)
+        # Shortcuts with Ctrl
         if is_ctrl:
             if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
                 if self.on_zoom_in:
@@ -233,8 +252,23 @@ class KeyboardEventHandler:
                 if self.on_reset_zoom:
                     self.on_reset_zoom()
                 return True
+            elif key == Qt.Key.Key_O:
+                if is_shift and self.on_open_folder:
+                    self.on_open_folder()
+                    return True
+                elif self.on_open_file:
+                    self.on_open_file()
+                    return True
+            elif key == Qt.Key.Key_G:
+                if self.on_goto_page:
+                    self.on_goto_page()
+                    return True
+            elif key == Qt.Key.Key_W:
+                if self.on_close_document:
+                    self.on_close_document()
+                    return True
 
-        # Navigation keys (without Ctrl)
+        # Shortcuts without Ctrl
         else:
             if key in (
                 Qt.Key.Key_Right,
@@ -275,6 +309,25 @@ class KeyboardEventHandler:
                     return True
                 elif self.on_toggle_mode:
                     self.on_toggle_mode()
+                    return True
+            elif key in (Qt.Key.Key_F11, Qt.Key.Key_F):
+                if self.on_fullscreen:
+                    self.on_fullscreen()
+                    return True
+            elif key == Qt.Key.Key_Escape:
+                if self.on_exit:
+                    self.on_exit()
+                    return True
+                elif self.on_exit_fullscreen:
+                    self.on_exit_fullscreen()
+                    return True
+            elif key == Qt.Key.Key_F1:
+                if self.on_help:
+                    self.on_help()
+                    return True
+            elif key == Qt.Key.Key_H:
+                if self.on_toggle_hud:
+                    self.on_toggle_hud()
                     return True
 
         return False
