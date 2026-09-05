@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .resources import APP_NAME
+
 
 class ShortcutsDialog(QDialog):
     """Present reader shortcuts using the application's card-based styling."""
@@ -57,7 +59,7 @@ class ShortcutsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("shortcutsDialog")
-        self.setWindowTitle("Shortcuts - Qt Scroll Reader")
+        self.setWindowTitle(f"Shortcuts - {APP_NAME}")
         self.setModal(True)
         self.setMinimumWidth(760)
         self._init_ui()

@@ -1,7 +1,7 @@
-"""Welcome / Empty State widget for Qt Scroll Reader."""
+"""Welcome and empty-state widget for Comic Scroll Reader."""
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QColor, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .resources import APP_ICON_PATH, APP_NAME
 
 
 class WelcomeWidget(QWidget):
@@ -43,7 +45,7 @@ class WelcomeWidget(QWidget):
             "QLabel { background: transparent; }"
             "QFrame#welcomeCard { border: none; }"
             "QFrame#heroPanel { background-color: #222630; border: none; border-radius: 14px; }"
-            "QLabel#heroIcon { background-color: #8ab4f8; color: #11141a; border-radius: 25px; font-size: 25px; }"
+            "QLabel#heroIcon { background: transparent; }"
             "QLabel#eyebrow { color: #8ab4f8; font-size: 10px; font-weight: 700; letter-spacing: 1px; }"
             "QLabel#title { color: #ffffff; font-size: 25px; font-weight: 700; }"
             "QLabel#subtitle { color: #b4bbc7; font-size: 13px; }"
@@ -77,10 +79,17 @@ class WelcomeWidget(QWidget):
         hero_layout.setContentsMargins(18, 15, 18, 15)
         hero_layout.setSpacing(13)
 
-        icon_label = QLabel("📖", hero)
+        icon_label = QLabel(hero)
         icon_label.setObjectName("heroIcon")
         icon_label.setFixedSize(50, 50)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(
+            QPixmap(str(APP_ICON_PATH)).scaled(
+                icon_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
         hero_layout.addWidget(icon_label)
 
         identity_layout = QVBoxLayout()
@@ -88,7 +97,7 @@ class WelcomeWidget(QWidget):
         identity_layout.setSpacing(1)
         eyebrow_label = QLabel("WELCOME TO", hero)
         eyebrow_label.setObjectName("eyebrow")
-        title_label = QLabel("Qt Scroll Reader", hero)
+        title_label = QLabel(APP_NAME, hero)
         title_label.setObjectName("title")
         subtitle_label = QLabel("Images, comic folders, and PDFs—your way.", hero)
         subtitle_label.setObjectName("subtitle")
@@ -157,7 +166,7 @@ class WelcomeWidget(QWidget):
         shortcuts_layout.addWidget(tips_label)
 
         card_layout.addWidget(shortcuts_panel)
-        main_layout.addWidget(self.card, 1, Qt.AlignmentFlag.AlignHCenter)
+        main_layout.addWidget(self.card, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.acknowledgements_label = QLabel(
             "Vibe coded by Alef_0 through Gemini and ChatGPT", self
@@ -167,8 +176,9 @@ class WelcomeWidget(QWidget):
         main_layout.addWidget(
             self.acknowledgements_label,
             0,
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+            Qt.AlignmentFlag.AlignHCenter,
         )
+        main_layout.addStretch(1)
         self._update_card_style()
 
     def set_drag_hover(self, hover: bool):

@@ -5,7 +5,7 @@ from PyQt6.QtCore import Qt, QPointF, QPoint
 from PyQt6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
-from src.controls.events import (
+from comic_scroll_reader.input_controls import (
     CommonViewerControls,
     KeyboardEventHandler,
     MouseEventHandler,
@@ -512,4 +512,3 @@ class TestCommonViewerControls(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

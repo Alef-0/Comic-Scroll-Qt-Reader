@@ -1,4 +1,4 @@
-"""Image Viewer widget and main window implementation using Qt6."""
+"""Main application window for Comic Scroll Reader."""
 
 import os
 import re
@@ -23,6 +23,7 @@ from PyQt6.QtGui import (
     QDragLeaveEvent,
     QDragMoveEvent,
     QDropEvent,
+    QIcon,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -32,47 +33,26 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import QEvent, Qt, QRect, QPointF, QSize, QTimer, pyqtSignal
 
-# Import controls handlers, scroll reader, and single viewer
-try:
-    from src.controls.events import (
-        CommonViewerControls,
-        KeyboardEventHandler,
-        MouseEventHandler,
-    )
-    from src.about_dialog import AboutDialog
-    from src.hud_overlay import ViewerHud
-    from src.image_pipeline import DecodeResult, ImagePipeline
-    from src.pdf_handler import (
-        build_pdf_page_uri,
-        close_pdf_handler,
-        get_pdf_handler,
-        is_pdf_file,
-        parse_pdf_page_uri,
-    )
-    from src.scroll_reader import ScrollReaderWidget
-    from src.single_viewer import ImageViewerWidget, ScaledImageLabel
-    from src.shortcuts_dialog import ShortcutsDialog
-    from src.welcome_widget import WelcomeWidget
-except ImportError:
-    from controls.events import (
-        CommonViewerControls,
-        KeyboardEventHandler,
-        MouseEventHandler,
-    )
-    from about_dialog import AboutDialog
-    from hud_overlay import ViewerHud
-    from image_pipeline import DecodeResult, ImagePipeline
-    from pdf_handler import (
-        build_pdf_page_uri,
-        close_pdf_handler,
-        get_pdf_handler,
-        is_pdf_file,
-        parse_pdf_page_uri,
-    )
-    from scroll_reader import ScrollReaderWidget
-    from single_viewer import ImageViewerWidget, ScaledImageLabel
-    from shortcuts_dialog import ShortcutsDialog
-    from welcome_widget import WelcomeWidget
+from .about_dialog import AboutDialog
+from .hud_overlay import ViewerHud
+from .image_pipeline import DecodeResult, ImagePipeline
+from .input_controls import (
+    CommonViewerControls,
+    KeyboardEventHandler,
+    MouseEventHandler,
+)
+from .pdf_handler import (
+    build_pdf_page_uri,
+    close_pdf_handler,
+    get_pdf_handler,
+    is_pdf_file,
+    parse_pdf_page_uri,
+)
+from .resources import APP_ICON_PATH, APP_NAME
+from .scroll_reader import ScrollReaderWidget
+from .shortcuts_dialog import ShortcutsDialog
+from .single_viewer import ImageViewerWidget, ScaledImageLabel
+from .welcome_widget import WelcomeWidget
 
 
 
@@ -133,7 +113,7 @@ class MainWindow(QMainWindow):
     """
 
     DEFAULT_WIDTH = 580
-    DEFAULT_HEIGHT = 420
+    DEFAULT_HEIGHT = 330
     VIEWER_WIDTH = 1280
     VIEWER_HEIGHT = 720
     image_loaded = pyqtSignal(str)
@@ -146,10 +126,12 @@ class MainWindow(QMainWindow):
         target_path: Optional[str] = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Qt Scroll Reader - Image Viewer")
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
         # Image pipeline shared across both viewer widgets
         self._image_pipeline = ImagePipeline(self)
+        self._shutdown_started = False
         self._image_pipeline.image_ready.connect(self._on_image_ready)
         self._image_pipeline.image_failed.connect(self._on_image_failed)
 
@@ -397,6 +379,7 @@ class MainWindow(QMainWindow):
     ) -> bool:
         """Scan a folder for supported images, sort them alphabetically, and open the target."""
         if self.pdf_path:
+            self._image_pipeline.wait_for_idle()
             close_pdf_handler(self.pdf_path)
             self.pdf_path = None
 
@@ -469,6 +452,7 @@ class MainWindow(QMainWindow):
             return False
 
         if self.pdf_path and self.pdf_path != resolved:
+            self._image_pipeline.wait_for_idle()
             close_pdf_handler(self.pdf_path)
 
         try:
@@ -552,7 +536,7 @@ class MainWindow(QMainWindow):
     def update_title(self):
         """Update window title with [X/Total] counter, filename, dimensions, and zoom."""
         if not self.image_list:
-            self.setWindowTitle("Qt Scroll Reader - [0/0] No images found")
+            self.setWindowTitle(f"{APP_NAME} - [0/0] No images found")
             if hasattr(self, "_hud"):
                 self._hud.hide_immediately()
             return
@@ -563,7 +547,7 @@ class MainWindow(QMainWindow):
             path = self.image_list[self._requested_index]
             filename = self._display_name(path)
             self.setWindowTitle(
-                f"Qt Scroll Reader{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
+                f"{APP_NAME}{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
                 f"Loading {filename}…"
             )
             if hasattr(self, "_hud"):
@@ -571,7 +555,7 @@ class MainWindow(QMainWindow):
             return
 
         if not (0 <= self.current_index < len(self.image_list)):
-            self.setWindowTitle("Qt Scroll Reader - [0/0] No image displayed")
+            self.setWindowTitle(f"{APP_NAME} - [0/0] No image displayed")
             if hasattr(self, "_hud"):
                 self._hud.hide_immediately()
             return
@@ -600,7 +584,7 @@ class MainWindow(QMainWindow):
         zoom_str = f" - {zoom_pct}%" if zoom_pct != 100 else ""
 
         self.setWindowTitle(
-            f"Qt Scroll Reader{mode_tag} - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
+            f"{APP_NAME}{mode_tag} - [{self.current_index + 1}/{len(self.image_list)}] {filename}{dim_str}{zoom_str}"
         )
         if hasattr(self, "_hud"):
             self._hud.set_page_info(self.current_index, len(self.image_list))
@@ -1014,7 +998,7 @@ class MainWindow(QMainWindow):
         shortcuts_action.triggered.connect(self.show_shortcuts_dialog)
         help_menu.addAction(shortcuts_action)
 
-        about_action = QAction("&About Qt Scroll Reader", self)
+        about_action = QAction(f"&About {APP_NAME}", self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
 
@@ -1179,15 +1163,16 @@ class MainWindow(QMainWindow):
 
     def close_current(self):
         """Close current document or folder and return to welcome screen."""
-        if self.pdf_path:
-            close_pdf_handler(self.pdf_path)
-            self.pdf_path = None
         self.folder_path = None
         self.image_list = []
         self.current_index = -1
         self._requested_index = None
         self.image_viewer.clear()
         self.scroll_reader.clear()
+        self._image_pipeline.wait_for_idle()
+        if self.pdf_path:
+            close_pdf_handler(self.pdf_path)
+            self.pdf_path = None
         if self.isFullScreen() or self.isMaximized() or self.isMinimized():
             self.showNormal()
         self.menuBar().setVisible(True)
@@ -1235,9 +1220,17 @@ class MainWindow(QMainWindow):
             else:
                 super().keyPressEvent(event)
 
-    def closeEvent(self, event):
-        """Clean up resources on window close."""
+    def shutdown(self) -> None:
+        """Finish decoder work before releasing Qt and PDFium resources."""
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        self._image_pipeline.shutdown()
         if self.pdf_path:
             close_pdf_handler(self.pdf_path)
             self.pdf_path = None
+
+    def closeEvent(self, event):
+        """Clean up resources on window close."""
+        self.shutdown()
         super().closeEvent(event)

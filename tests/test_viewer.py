@@ -16,14 +16,14 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QSize, QRect, QPoint, QPointF, QEventLoop, QTimer
 
-from src.viewer import (
+from comic_scroll_reader.main_window import (
     ImageViewerWidget,
     ScaledImageLabel,
     MainWindow,
     ViewerMode,
     natural_sort_key,
 )
-from src.image_pipeline import (
+from comic_scroll_reader.image_pipeline import (
     ByteBoundedImageCache,
     CachedImage,
     DecodeRequest,

@@ -18,14 +18,9 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QAbstractScrollArea
 
-try:
-    from src.controls.events import CommonViewerControls
-    from src.image_pipeline import MIB, DecodeResult, ImagePipeline
-    from src.pdf_handler import get_pdf_page_size, parse_pdf_page_uri
-except ImportError:
-    from controls.events import CommonViewerControls
-    from image_pipeline import MIB, DecodeResult, ImagePipeline
-    from pdf_handler import get_pdf_page_size, parse_pdf_page_uri
+from .image_pipeline import MIB, DecodeResult, ImagePipeline
+from .input_controls import CommonViewerControls
+from .pdf_handler import get_pdf_page_size, parse_pdf_page_uri
 
 
 class ScrollReaderWidget(QAbstractScrollArea):

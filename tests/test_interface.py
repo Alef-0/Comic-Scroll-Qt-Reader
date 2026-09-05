@@ -8,12 +8,12 @@ from PyQt6.QtCore import QMimeData, QPointF, QSize, Qt, QUrl, QEvent
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QKeyEvent
 from PyQt6.QtWidgets import QApplication, QLabel
 
-from src.about_dialog import AboutDialog
-from src.main import parse_arguments
-from src.hud_overlay import ViewerHud
-from src.shortcuts_dialog import ShortcutsDialog
-from src.viewer import ComicMode, MainWindow, ViewerMode
-from src.welcome_widget import WelcomeWidget
+from comic_scroll_reader.__main__ import parse_arguments
+from comic_scroll_reader.about_dialog import AboutDialog
+from comic_scroll_reader.hud_overlay import ViewerHud
+from comic_scroll_reader.main_window import ComicMode, MainWindow, ViewerMode
+from comic_scroll_reader.shortcuts_dialog import ShortcutsDialog
+from comic_scroll_reader.welcome_widget import WelcomeWidget
 
 app = QApplication.instance()
 if app is None:
@@ -48,6 +48,9 @@ class TestWelcomeWidget(unittest.TestCase):
         self.assertTrue(self.widget.autoFillBackground())
         self.assertEqual(self.widget.palette().window().color().name(), "#17191f")
         self.assertIn("QLabel { background: transparent; }", self.widget.styleSheet())
+        hero_icon = self.widget.findChild(QLabel, "heroIcon")
+        self.assertIsNotNone(hero_icon.pixmap())
+        self.assertFalse(hero_icon.pixmap().isNull())
 
     def test_drag_hover_state_change(self):
         self.widget.set_drag_hover(True)
@@ -102,6 +105,11 @@ class TestWelcomeWidget(unittest.TestCase):
             self.widget.styleSheet(),
         )
 
+    def test_content_stays_packed_above_remaining_space(self):
+        layout = self.widget.layout()
+        self.assertEqual(layout.stretch(layout.indexOf(self.widget.card)), 0)
+        self.assertEqual(layout.stretch(layout.count() - 1), 1)
+
 
 class TestAboutDialog(unittest.TestCase):
     """Test the custom About dialog's content and controls."""
@@ -113,7 +121,7 @@ class TestAboutDialog(unittest.TestCase):
         self.assertIn("PyQt6", label_text)
         self.assertIn("pypdfium2", label_text)
         self.assertIn("Vibe coded by Alef_0 through Gemini and ChatGPT", label_text)
-        self.assertEqual(dialog.windowTitle(), "About Qt Scroll Reader")
+        self.assertEqual(dialog.windowTitle(), "About Comic Scroll Reader")
         dialog.deleteLater()
 
 
@@ -160,6 +168,11 @@ class TestViewerHud(unittest.TestCase):
         self.assertGreaterEqual(self.hud.btn_page.minimumWidth(), expected_width)
 
     def test_mode_and_zoom_display(self):
+        self.assertEqual(
+            self.hud.btn_comic_mode.text(),
+            ViewerHud.COMIC_MODE_LABELS["custom"],
+        )
+
         self.hud.set_mode(is_scroll=True)
         self.assertIn("Scroll", self.hud.btn_mode.text())
 
@@ -324,6 +337,9 @@ class TestMainWindowInterface(unittest.TestCase):
         self.assertIs(window._stack.currentWidget(), window.welcome_widget)
         self.assertEqual(window.image_list, [])
         self.assertEqual(window.current_index, -1)
+        self.assertEqual(window.size().width(), window.DEFAULT_WIDTH)
+        self.assertEqual(window.size().height(), window.DEFAULT_HEIGHT)
+        self.assertFalse(window.windowIcon().isNull())
         self.assertIn("No images found", window.windowTitle())
         self.assertFalse(window._hud.isVisible())
         window.deleteLater()

@@ -1,4 +1,4 @@
-"""Floating HUD overlay for Qt Scroll Reader."""
+"""Floating reader-controls HUD for Comic Scroll Reader."""
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -149,7 +149,7 @@ class ViewerHud(QWidget):
         pill_layout.addWidget(self._make_separator())
 
         self.btn_comic_mode = QToolButton(self.pill)
-        self.btn_comic_mode.setText("📚 Custom")
+        self.btn_comic_mode.setText(self.COMIC_MODE_LABELS["custom"])
         self.btn_comic_mode.setToolTip("Choose a comic reading layout")
         self.btn_comic_mode.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_comic_mode.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)

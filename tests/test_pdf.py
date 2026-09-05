@@ -1,8 +1,9 @@
-"""Tests for PDF support in Qt Scroll Reader via pypdfium2."""
+"""Tests for PDF support in Comic Scroll Reader via pypdfium2."""
 
 import os
 import tempfile
 import threading
+import time
 from typing import Generator
 
 import pytest
@@ -11,10 +12,11 @@ from PyQt6.QtCore import QEventLoop, QSize, Qt, QTimer
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QApplication
 
-import src.pdf_handler as pdf_handler_module
-from src.image_pipeline import DecodeResult, ImagePipeline
-from src.main import parse_arguments
-from src.pdf_handler import (
+import comic_scroll_reader.pdf_handler as pdf_handler_module
+import comic_scroll_reader.image_pipeline as image_pipeline_module
+from comic_scroll_reader.__main__ import parse_arguments
+from comic_scroll_reader.image_pipeline import DecodeResult, ImagePipeline
+from comic_scroll_reader.pdf_handler import (
     PdfDocumentHandler,
     build_pdf_page_uri,
     close_all_pdf_handlers,
@@ -26,8 +28,8 @@ from src.pdf_handler import (
     parse_pdf_page_uri,
     render_pdf_page,
 )
-from src.scroll_reader import ScrollReaderWidget
-from src.viewer import MainWindow, ViewerMode
+from comic_scroll_reader.main_window import MainWindow, ViewerMode
+from comic_scroll_reader.scroll_reader import ScrollReaderWidget
 
 
 @pytest.fixture(scope="session")
@@ -290,6 +292,63 @@ def test_image_pipeline_pdf(qapp: QApplication, sample_pdf: str):
     assert res.source_size == QSize(800, 600)
 
 
+def test_pipeline_shutdown_waits_for_running_pdf(
+    qapp: QApplication, sample_pdf: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Shutdown must join an active PDFium render before its document is closed."""
+    render_started = threading.Event()
+    original_render = image_pipeline_module.render_pdf_page
+
+    def slow_render(*args, **kwargs):
+        render_started.set()
+        time.sleep(0.05)
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(image_pipeline_module, "render_pdf_page", slow_render)
+    pipeline = ImagePipeline()
+    uri = build_pdf_page_uri(sample_pdf, 0)
+    pipeline.request_preview(
+        uri, QSize(800, 1200), request_id=1, purpose="scroll-0"
+    )
+    assert render_started.wait(timeout=1.0)
+
+    pipeline.shutdown()
+    close_pdf_handler(sample_pdf)
+
+    assert pipeline._shutting_down is True
+    assert pipeline.pool.activeThreadCount() == 0
+    assert pipeline.pdf_pool.activeThreadCount() == 0
+    assert pipeline._workers == {}
+
+    pipeline.request_preview(
+        uri, QSize(200, 300), request_id=2, purpose="scroll-0"
+    )
+    assert pipeline._workers == {}
+
+
+def test_window_close_waits_for_active_pdf_render(
+    qapp: QApplication, sample_pdf: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Closing the application during progressive PDF loading must be safe."""
+    render_started = threading.Event()
+    original_render = image_pipeline_module.render_pdf_page
+
+    def slow_render(*args, **kwargs):
+        render_started.set()
+        time.sleep(0.05)
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(image_pipeline_module, "render_pdf_page", slow_render)
+    window = MainWindow(target_path=sample_pdf)
+    assert render_started.wait(timeout=1.0)
+
+    window.close()
+
+    assert window._shutdown_started is True
+    assert window._image_pipeline.pdf_pool.activeThreadCount() == 0
+    assert window.pdf_path is None
+
+
 def test_scroll_reader_pdf(qapp: QApplication, sample_pdf: str):
     """Verify ScrollReaderWidget sets up layout and dimensions for PDF pages."""
     reader = ScrollReaderWidget()
@@ -331,7 +390,7 @@ def test_main_window_open_pdf(qapp: QApplication, sample_pdf: str):
     # Title contains PDF filename and page
     window.update_title()
     title = window.windowTitle()
-    assert "Qt Scroll Reader [Scroll]" in title
+    assert "Comic Scroll Reader [Scroll]" in title
     assert os.path.basename(sample_pdf) in title
 
     # Navigation in scroll mode

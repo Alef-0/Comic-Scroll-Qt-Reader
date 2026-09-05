@@ -9,9 +9,9 @@ from PyQt6.QtCore import QEventLoop, QObject, QPointF, QSize, Qt, QTimer, pyqtSi
 from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
-from src.scroll_reader import ScrollReaderWidget
-from src.image_pipeline import DecodeRequest, DecodeResult
-from src.viewer import ImageViewerWidget, MainWindow, ViewerMode
+from comic_scroll_reader.image_pipeline import DecodeRequest, DecodeResult
+from comic_scroll_reader.main_window import ImageViewerWidget, MainWindow, ViewerMode
+from comic_scroll_reader.scroll_reader import ScrollReaderWidget
 
 # Ensure QApplication is initialized
 app = QApplication.instance()

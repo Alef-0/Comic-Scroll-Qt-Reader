@@ -7,21 +7,24 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Hashable, Optional, Set
 
-from PyQt6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QObject,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QImage, QImageReader
 
-try:
-    from src.pdf_handler import (
-        get_file_path_for_stat,
-        parse_pdf_page_uri,
-        render_pdf_page,
-    )
-except ImportError:
-    from pdf_handler import (
-        get_file_path_for_stat,
-        parse_pdf_page_uri,
-        render_pdf_page,
-    )
+from .pdf_handler import (
+    get_file_path_for_stat,
+    parse_pdf_page_uri,
+    render_pdf_page,
+)
 
 
 MIB = 1024 * 1024
@@ -267,6 +270,7 @@ class ImagePipeline(QObject):
         self._worker_ids_by_cache_key: dict[tuple, int] = {}
         self._worker_priorities: dict[int, int] = {}
         self._next_worker_id = 0
+        self._shutting_down = False
 
         # Reject pathological allocations before Qt attempts to create them.
         QImageReader.setAllocationLimit(self.MAX_FULL_IMAGE_BYTES // MIB)
@@ -283,6 +287,33 @@ class ImagePipeline(QObject):
 
     def request_full(self, path: str, request_id: int) -> None:
         self._request(path, None, request_id, "current-full", 1)
+
+    def wait_for_idle(self) -> None:
+        """Cancel pending consumers and wait for native decoders to finish safely."""
+        self.cancel_queued()
+        for worker in self._workers.values():
+            try:
+                worker.signals.finished.disconnect(self._on_finished)
+            except (RuntimeError, TypeError):
+                pass
+        self.pool.waitForDone()
+        self.pdf_pool.waitForDone()
+        # A worker may have posted its result just before it was disconnected.
+        # Release that QImage while the application and its Qt types still exist.
+        QCoreApplication.sendPostedEvents(self, QEvent.Type.MetaCall)
+        self._workers.clear()
+        self._worker_pools.clear()
+        self._inflight_waiters.clear()
+        self._worker_ids_by_cache_key.clear()
+        self._worker_priorities.clear()
+
+    def shutdown(self) -> None:
+        """Permanently stop decoding before the owning window is destroyed."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        self.wait_for_idle()
+        self.preview_cache.clear()
 
     def cancel_queued(self, purposes: Optional[Set[str]] = None) -> None:
         """Cancel matching consumers without disturbing unrelated shared work.
@@ -375,6 +406,9 @@ class ImagePipeline(QObject):
         purpose: str,
         priority: int,
     ) -> None:
+        if self._shutting_down:
+            return
+
         stat_path = get_file_path_for_stat(path)
         try:
             stat_result = os.stat(stat_path)
@@ -432,6 +466,9 @@ class ImagePipeline(QObject):
         worker_pool.start(worker, priority)
 
     def _on_finished(self, worker_id: int, result: DecodeResult) -> None:
+        if self._shutting_down:
+            return
+
         self._workers.pop(worker_id, None)
         self._worker_pools.pop(worker_id, None)
         self._worker_ids_by_cache_key.pop(result.request.cache_key, None)

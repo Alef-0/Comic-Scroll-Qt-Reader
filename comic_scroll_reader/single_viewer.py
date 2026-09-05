@@ -13,10 +13,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QWidget
 
-try:
-    from src.controls.events import CommonViewerControls, MouseEventHandler
-except ImportError:
-    from controls.events import CommonViewerControls, MouseEventHandler
+from .input_controls import CommonViewerControls, MouseEventHandler
 
 
 class ImageViewerWidget(QWidget):

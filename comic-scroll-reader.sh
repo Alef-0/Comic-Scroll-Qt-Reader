@@ -5,4 +5,5 @@ if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
 else
     PYTHON="python3"
 fi
-exec "$PYTHON" "$SCRIPT_DIR/run_program.py" "$@"
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -m comic_scroll_reader "$@"

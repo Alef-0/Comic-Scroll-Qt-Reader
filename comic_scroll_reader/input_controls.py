@@ -1,4 +1,4 @@
-"""Mouse and keyboard event handlers for the image viewer."""
+"""Shared mouse and keyboard controls for both reader views."""
 
 from typing import Callable, Optional
 from PyQt6.QtCore import QObject, QPointF, Qt, pyqtSignal

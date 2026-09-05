@@ -1,7 +1,7 @@
 """Auxiliary module for PDF document interactions using pypdfium2.
 
 Provides thread-safe PDF page acquisition, size querying, and rendering to QImage
-compatible with the Qt Scroll Reader continuous and single-page viewing pipelines.
+compatible with the Comic Scroll Reader continuous and single-page pipelines.
 """
 
 from __future__ import annotations

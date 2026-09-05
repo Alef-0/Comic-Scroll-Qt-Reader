@@ -1,4 +1,4 @@
-"""Custom About dialog for Qt Scroll Reader."""
+"""Custom About dialog for Comic Scroll Reader."""
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .resources import APP_NAME
+
 
 class AboutDialog(QDialog):
     """Present project details in a compact, purpose-built layout."""
@@ -17,7 +19,7 @@ class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("aboutDialog")
-        self.setWindowTitle("About Qt Scroll Reader")
+        self.setWindowTitle(f"About {APP_NAME}")
         self.setModal(True)
         self.setMinimumWidth(620)
         self._init_ui()
@@ -81,7 +83,7 @@ class AboutDialog(QDialog):
 
         identity_layout = QVBoxLayout()
         identity_layout.setSpacing(2)
-        title = QLabel("Qt Scroll Reader", hero)
+        title = QLabel(APP_NAME, hero)
         title.setObjectName("appTitle")
         tagline = QLabel(
             "A focused desktop reader for images, comic folders, and PDF documents.",
