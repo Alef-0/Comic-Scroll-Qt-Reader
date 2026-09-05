@@ -380,7 +380,14 @@ class MainWindow(QMainWindow):
         self._requested_index = index
         self._full_request_pending = False
         self._refine_request_key = None
-        self._image_pipeline.cancel_queued()
+        self._image_pipeline.cancel_queued(
+            {
+                "current-preview",
+                "refined-preview",
+                "current-full",
+                "prefetch-preview",
+            }
+        )
         self.image_viewer.release_full_resolution()
         self.update_title()
         self._image_pipeline.request_preview(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Hashable, Optional
+from typing import Hashable, Optional, Set
 
 from PyQt6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QImageReader
@@ -164,6 +164,8 @@ class ImagePipeline(QObject):
         self.preview_cache = ByteBoundedImageCache(self.PREVIEW_CACHE_BYTES)
         self._workers: dict[int, _DecodeWorker] = {}
         self._inflight_waiters: dict[tuple, list[DecodeRequest]] = {}
+        self._worker_ids_by_cache_key: dict[tuple, int] = {}
+        self._worker_priorities: dict[int, int] = {}
         self._next_worker_id = 0
 
         # Reject pathological allocations before Qt attempts to create them.
@@ -182,12 +184,70 @@ class ImagePipeline(QObject):
     def request_full(self, path: str, request_id: int) -> None:
         self._request(path, None, request_id, "current-full", 1)
 
-    def cancel_queued(self) -> None:
-        """Remove work that has not started; running decodes finish and are ignored if stale."""
+    def cancel_queued(self, purposes: Optional[Set[str]] = None) -> None:
+        """Cancel matching consumers without disturbing unrelated shared work.
+
+        Queued workers are removed when none of their consumers remain. Running
+        decodes finish, but their cancelled consumers no longer receive results.
+        Passing no purposes preserves the original cancel-all behaviour.
+        """
         for worker_id, worker in list(self._workers.items()):
+            cache_key = worker.request.cache_key
+            waiting_requests = self._inflight_waiters.get(cache_key, [])
+            if purposes is not None:
+                remaining_requests = [
+                    request
+                    for request in waiting_requests
+                    if request.purpose not in purposes
+                ]
+                if remaining_requests:
+                    self._inflight_waiters[cache_key] = remaining_requests
+                    continue
+
+            # Leave an empty waiter list behind for a running decode. A later
+            # request for the same pixels can then attach to that work safely.
+            self._inflight_waiters[cache_key] = []
             if self.pool.tryTake(worker):
                 self._workers.pop(worker_id, None)
-                self._inflight_waiters.pop(worker.request.cache_key, None)
+                self._inflight_waiters.pop(cache_key, None)
+                self._worker_ids_by_cache_key.pop(cache_key, None)
+                self._worker_priorities.pop(worker_id, None)
+
+    def promote_queued(
+        self, path: str, bounds: QSize, priority: int
+    ) -> bool:
+        """Raise a matching queued preview's priority when it becomes visible."""
+        absolute_path = os.path.abspath(path)
+        try:
+            stat_result = os.stat(absolute_path)
+        except OSError:
+            return False
+
+        cache_key = (
+            absolute_path,
+            (stat_result.st_mtime_ns, stat_result.st_size),
+            (bounds.width(), bounds.height()),
+        )
+        worker_id = self._worker_ids_by_cache_key.get(cache_key)
+        return self._promote_cache_key(cache_key, worker_id, priority)
+
+    def _promote_cache_key(
+        self, cache_key: tuple, worker_id: Optional[int], priority: int
+    ) -> bool:
+        if worker_id is None:
+            return False
+
+        current_priority = self._worker_priorities.get(worker_id, 0)
+        if priority <= current_priority:
+            return True
+
+        worker = self._workers.get(worker_id)
+        if worker is None or not self.pool.tryTake(worker):
+            return False
+
+        self._worker_priorities[worker_id] = priority
+        self.pool.start(worker, priority)
+        return True
 
     def retain_preview_paths(self, paths: set[str]) -> None:
         self.preview_cache.retain_paths({os.path.abspath(path) for path in paths})
@@ -241,6 +301,11 @@ class ImagePipeline(QObject):
 
         if cache_key in self._inflight_waiters:
             self._inflight_waiters[cache_key].append(request)
+            self._promote_cache_key(
+                cache_key,
+                self._worker_ids_by_cache_key.get(cache_key),
+                priority,
+            )
             return
 
         self._next_worker_id += 1
@@ -248,6 +313,8 @@ class ImagePipeline(QObject):
         worker = _DecodeWorker(worker_id, request)
         self._workers[worker_id] = worker
         self._inflight_waiters[cache_key] = [request]
+        self._worker_ids_by_cache_key[cache_key] = worker_id
+        self._worker_priorities[worker_id] = priority
         worker.signals.finished.connect(
             self._on_finished, Qt.ConnectionType.QueuedConnection
         )
@@ -255,6 +322,8 @@ class ImagePipeline(QObject):
 
     def _on_finished(self, worker_id: int, result: DecodeResult) -> None:
         self._workers.pop(worker_id, None)
+        self._worker_ids_by_cache_key.pop(result.request.cache_key, None)
+        self._worker_priorities.pop(worker_id, None)
         waiting_requests = self._inflight_waiters.pop(
             result.request.cache_key, [result.request]
         )

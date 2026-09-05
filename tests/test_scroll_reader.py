@@ -5,11 +5,12 @@ import shutil
 import tempfile
 import unittest
 
-from PyQt6.QtCore import QEventLoop, QPointF, QSize, Qt, QTimer
+from PyQt6.QtCore import QEventLoop, QObject, QPointF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 from src.scroll_reader import ScrollReaderWidget
+from src.image_pipeline import DecodeRequest, DecodeResult
 from src.viewer import ImageViewerWidget, MainWindow, ViewerMode
 
 # Ensure QApplication is initialized
@@ -34,6 +35,121 @@ def wait_for_signal(signal, condition, timeout_ms=3000):
     except TypeError:
         pass
     return condition()
+
+
+class RecordingPipeline(QObject):
+    """Deterministic pipeline double for scroll request lifecycle tests."""
+
+    image_ready = pyqtSignal(object)
+    image_failed = pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+        self.promotions = []
+        self.cancellations = []
+
+    def request_preview(
+        self, path, bounds, request_id, purpose="current-preview", priority=0
+    ):
+        self.requests.append(
+            {
+                "path": os.path.abspath(path),
+                "bounds": QSize(bounds),
+                "request_id": request_id,
+                "purpose": purpose,
+                "priority": priority,
+            }
+        )
+
+    def promote_queued(self, path, bounds, priority):
+        self.promotions.append((os.path.abspath(path), QSize(bounds), priority))
+        return True
+
+    def cancel_queued(self, purposes=None):
+        self.cancellations.append(set(purposes) if purposes is not None else None)
+
+
+class TestScrollReaderRequestLifecycle(unittest.TestCase):
+    """Regression coverage for sharpness, priority promotion, and stale work."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.image_paths = []
+        for index in range(5):
+            path = os.path.join(self.temp_dir, f"page{index + 1}.png")
+            image = QImage(200, 400, QImage.Format.Format_RGB32)
+            image.fill(QColor("cyan"))
+            image.save(path, "PNG")
+            self.image_paths.append(path)
+
+        self.pipeline = RecordingPipeline()
+        self.widget = ScrollReaderWidget(pipeline=self.pipeline)
+        self.widget.resize(400, 300)
+
+    def tearDown(self):
+        self.widget.deleteLater()
+        shutil.rmtree(self.temp_dir)
+
+    @staticmethod
+    def result_for(record, color="cyan"):
+        image = QImage(
+            record["bounds"].width(),
+            record["bounds"].height(),
+            QImage.Format.Format_RGB32,
+        )
+        image.fill(QColor(color))
+        request = DecodeRequest(
+            request_id=record["request_id"],
+            path=record["path"],
+            purpose=record["purpose"],
+            bounds=QSize(record["bounds"]),
+            cache_key=(record["path"], record["bounds"].width()),
+        )
+        return DecodeResult(request, image, QSize(200, 400))
+
+    def test_zoom_requests_larger_decode_and_keeps_sharpest_result(self):
+        """A visible page refines after zoom and a late small result is ignored."""
+        self.widget.set_images([self.image_paths[0]])
+        small_request = self.pipeline.requests[-1]
+
+        self.widget.set_zoom(2.0)
+        large_request = self.pipeline.requests[-1]
+        self.assertGreater(
+            large_request["bounds"].width(), small_request["bounds"].width()
+        )
+
+        self.widget._on_image_ready(self.result_for(large_request, "green"))
+        self.widget._on_image_ready(self.result_for(small_request, "red"))
+
+        self.assertEqual(self.widget._pixmaps[0].size(), large_request["bounds"])
+        self.assertEqual(self.widget._decoded_bounds[0], large_request["bounds"])
+
+    def test_visible_prefetch_is_promoted(self):
+        """A nearby low-priority request is promoted when scrolled into view."""
+        self.widget.set_images(self.image_paths)
+        page_two = next(
+            request
+            for request in self.pipeline.requests
+            if request["request_id"] == 1
+        )
+        self.assertEqual(page_two["priority"], 0)
+
+        self.widget.scroll_to_index(1)
+
+        self.assertIn(
+            (self.image_paths[1], page_two["bounds"], 2),
+            self.pipeline.promotions,
+        )
+
+    def test_fast_scroll_cancels_distant_pending_consumers(self):
+        """Pending work outside the prefetch window cannot grow across the folder."""
+        self.widget.set_images(self.image_paths)
+        self.widget.scroll_to_index(4)
+
+        cancelled_purposes = set().union(*self.pipeline.cancellations)
+        self.assertIn("scroll-0", cancelled_purposes)
+        self.assertIn("scroll-1", cancelled_purposes)
 
 
 class TestScrollReaderWidget(unittest.TestCase):

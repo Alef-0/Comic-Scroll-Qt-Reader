@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QImage, QPixmap, QColor, QKeyEvent
 from PyQt6.QtCore import Qt, QSize, QRect, QPointF, QEventLoop, QTimer
@@ -19,6 +20,7 @@ from src.image_pipeline import (
     CachedImage,
     DecodeRequest,
     DecodeResult,
+    ImagePipeline,
 )
 
 # Ensure single QApplication instance across tests
@@ -242,6 +244,38 @@ class TestByteBoundedImageCache(unittest.TestCase):
         self.assertIsNone(cache.get(("a",)))
         self.assertIsNotNone(cache.get(("b",)))
         self.assertLessEqual(cache.bytes_used, cache.byte_limit)
+
+
+class TestImagePipelineCancellation(unittest.TestCase):
+    """Ensure one viewer cannot strand another viewer's shared requests."""
+
+    def test_scoped_cancel_preserves_scroll_consumer(self):
+        pipeline = ImagePipeline()
+        cache_key = ("/tmp/page.png", (1, 1), (800, 1200))
+        current_request = DecodeRequest(
+            1,
+            "/tmp/page.png",
+            "current-preview",
+            QSize(800, 1200),
+            cache_key,
+        )
+        scroll_request = DecodeRequest(
+            0,
+            "/tmp/page.png",
+            "scroll-0",
+            QSize(800, 1200),
+            cache_key,
+        )
+        worker = SimpleNamespace(request=current_request)
+        pipeline._workers[1] = worker
+        pipeline._inflight_waiters[cache_key] = [current_request, scroll_request]
+        pipeline._worker_ids_by_cache_key[cache_key] = 1
+        pipeline._worker_priorities[1] = 2
+
+        pipeline.cancel_queued({"current-preview"})
+
+        self.assertIn(1, pipeline._workers)
+        self.assertEqual(pipeline._inflight_waiters[cache_key], [scroll_request])
 
 
 class TestMainWindow(unittest.TestCase):

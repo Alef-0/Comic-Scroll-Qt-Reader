@@ -84,6 +84,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._image_sizes: Dict[str, QSize] = {}
         self._image_rects: List[QRect] = []
         self._pixmaps: Dict[int, QPixmap] = {}
+        self._decoded_bounds: Dict[int, QSize] = {}
+        self._pending_requests: Dict[int, Dict[tuple[int, int], int]] = {}
         self._requested_indices: Set[int] = set()
         self._failed_indices: Set[int] = set()
 
@@ -137,8 +139,11 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
     def set_images(self, image_list: List[str], start_index: int = 0) -> None:
         """Set image list and initialize layout, scrolling to start_index."""
+        self._cancel_pending_requests()
         self._image_list = list(image_list)
         self._pixmaps.clear()
+        self._decoded_bounds.clear()
+        self._pending_requests.clear()
         self._requested_indices.clear()
         self._failed_indices.clear()
 
@@ -155,9 +160,12 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
     def clear(self) -> None:
         """Clear all images and reset layout."""
+        self._cancel_pending_requests()
         self._image_list.clear()
         self._image_rects.clear()
         self._pixmaps.clear()
+        self._decoded_bounds.clear()
+        self._pending_requests.clear()
         self._requested_indices.clear()
         self._failed_indices.clear()
         self._current_visible_index = 0
@@ -328,7 +336,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self.viewport().update()
 
     def _update_visible_images(self) -> None:
-        """Request previews for visible + nearby images, prune distant pixmaps."""
+        """Request correctly sized previews and keep pending work near the viewport."""
         if not self._image_rects or not self._pipeline:
             return
 
@@ -350,31 +358,94 @@ class ScrollReaderWidget(QAbstractScrollArea):
         # Prefetch window: 1 above, 2 below
         prefetch_min = max(0, min_vis - 1)
         prefetch_max = min(len(self._image_list) - 1, max_vis + 2)
+        wanted_indices = set(range(prefetch_min, prefetch_max + 1))
+
+        # Fast scrolling must not leave an ever-growing low-priority queue. Drop
+        # consumers which have moved outside the prefetch window; running image
+        # reads may finish internally, but their stale result is not delivered.
+        distant_pending = self._requested_indices - wanted_indices
+        if distant_pending:
+            self._pipeline.cancel_queued(
+                {f"scroll-{idx}" for idx in distant_pending}
+            )
+            for idx in distant_pending:
+                self._pending_requests.pop(idx, None)
+                self._requested_indices.discard(idx)
 
         dpr = self.devicePixelRatioF()
 
         for idx in range(prefetch_min, prefetch_max + 1):
-            if idx not in self._pixmaps and idx not in self._requested_indices:
-                rect = self._image_rects[idx]
-                target_bounds = QSize(
-                    max(1, int(round(rect.width() * dpr))),
-                    max(1, int(round(rect.height() * dpr))),
-                )
-                priority = 2 if (min_vis <= idx <= max_vis) else 0
-                self._requested_indices.add(idx)
-                self._pipeline.request_preview(
-                    self._image_list[idx],
-                    target_bounds,
-                    request_id=idx,
-                    purpose=f"scroll-{idx}",
-                    priority=priority,
-                )
+            rect = self._image_rects[idx]
+            target_bounds = QSize(
+                max(1, int(round(rect.width() * dpr))),
+                max(1, int(round(rect.height() * dpr))),
+            )
+            priority = 2 if (min_vis <= idx <= max_vis) else 0
+
+            decoded_bounds = self._decoded_bounds.get(idx)
+            if decoded_bounds is not None and self._bounds_cover(
+                decoded_bounds, target_bounds
+            ):
+                continue
+
+            pending = self._pending_requests.setdefault(idx, {})
+            covering_key = next(
+                (
+                    key
+                    for key in pending
+                    if self._bounds_cover(QSize(*key), target_bounds)
+                ),
+                None,
+            )
+            if covering_key is not None:
+                if priority > pending[covering_key]:
+                    queued_bounds = QSize(*covering_key)
+                    self._pipeline.promote_queued(
+                        self._image_list[idx], queued_bounds, priority
+                    )
+                    pending[covering_key] = priority
+                continue
+
+            bounds_key = (target_bounds.width(), target_bounds.height())
+            pending[bounds_key] = priority
+            self._requested_indices.add(idx)
+            self._pipeline.request_preview(
+                self._image_list[idx],
+                target_bounds,
+                request_id=idx,
+                purpose=f"scroll-{idx}",
+                priority=priority,
+            )
 
         # Prune distant cached pixmaps to bound memory usage
         retained_range = set(range(max(0, min_vis - 5), min(len(self._image_list), max_vis + 6)))
         for idx in list(self._pixmaps.keys()):
             if idx not in retained_range:
                 del self._pixmaps[idx]
+                self._decoded_bounds.pop(idx, None)
+
+    @staticmethod
+    def _bounds_cover(available: QSize, required: QSize) -> bool:
+        return (
+            available.width() >= required.width()
+            and available.height() >= required.height()
+        )
+
+    def _finish_pending_request(self, idx: int, bounds: Optional[QSize]) -> None:
+        if bounds is not None:
+            pending = self._pending_requests.get(idx)
+            if pending is not None:
+                pending.pop((bounds.width(), bounds.height()), None)
+                if not pending:
+                    self._pending_requests.pop(idx, None)
+        if idx not in self._pending_requests:
+            self._requested_indices.discard(idx)
+
+    def _cancel_pending_requests(self) -> None:
+        if self._pipeline is not None and self._requested_indices:
+            self._pipeline.cancel_queued(
+                {f"scroll-{idx}" for idx in self._requested_indices}
+            )
 
     def _on_image_ready(self, result: DecodeResult) -> None:
         """Receive decoded preview from ImagePipeline and repaint."""
@@ -383,12 +454,27 @@ class ScrollReaderWidget(QAbstractScrollArea):
             return
 
         idx = request.request_id
-        self._requested_indices.discard(idx)
+        if not (
+            0 <= idx < len(self._image_list)
+            and self._image_list[idx] == request.path
+        ):
+            return
+
+        self._finish_pending_request(idx, request.bounds)
         self._failed_indices.discard(idx)
 
-        if 0 <= idx < len(self._image_list) and self._image_list[idx] == request.path:
+        fulfilled_bounds = (
+            QSize(request.bounds)
+            if request.bounds is not None
+            else result.image.size()
+        )
+        current_bounds = self._decoded_bounds.get(idx)
+        if current_bounds is None or self._bounds_cover(
+            fulfilled_bounds, current_bounds
+        ):
             self._pixmaps[idx] = QPixmap.fromImage(result.image)
-            self.viewport().update()
+            self._decoded_bounds[idx] = fulfilled_bounds
+        self.viewport().update()
 
     def _on_image_failed(self, result: DecodeResult) -> None:
         """Handle decode failure."""
@@ -397,8 +483,15 @@ class ScrollReaderWidget(QAbstractScrollArea):
             return
 
         idx = request.request_id
-        self._requested_indices.discard(idx)
-        self._failed_indices.add(idx)
+        if not (
+            0 <= idx < len(self._image_list)
+            and self._image_list[idx] == request.path
+        ):
+            return
+
+        self._finish_pending_request(idx, request.bounds)
+        if idx not in self._pixmaps and idx not in self._pending_requests:
+            self._failed_indices.add(idx)
         self.viewport().update()
 
     def paintEvent(self, event) -> None:
