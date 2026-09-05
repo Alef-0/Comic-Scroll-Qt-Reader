@@ -19,10 +19,10 @@ from PyQt6.QtWidgets import QAbstractScrollArea
 
 try:
     from src.controls.events import CommonViewerControls
-    from src.image_pipeline import DecodeResult, ImagePipeline
+    from src.image_pipeline import MIB, DecodeResult, ImagePipeline
 except ImportError:
     from controls.events import CommonViewerControls
-    from image_pipeline import DecodeResult, ImagePipeline
+    from image_pipeline import MIB, DecodeResult, ImagePipeline
 
 
 class ScrollReaderWidget(QAbstractScrollArea):
@@ -50,6 +50,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
     MIN_ZOOM = 0.1
     MAX_ZOOM = 20.0
     SCROLL_STEP = 60
+    PIXMAP_CACHE_BYTES = 64 * MIB
 
     def __init__(self, parent=None, pipeline: Optional[ImagePipeline] = None):
         super().__init__(parent)
@@ -84,6 +85,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._image_sizes: Dict[str, QSize] = {}
         self._image_rects: List[QRect] = []
         self._pixmaps: Dict[int, QPixmap] = {}
+        self._pixmap_bytes_used = 0
         self._decoded_bounds: Dict[int, QSize] = {}
         self._pending_requests: Dict[int, Dict[tuple[int, int], int]] = {}
         self._requested_indices: Set[int] = set()
@@ -134,6 +136,10 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def image_rects(self) -> List[QRect]:
         return list(self._image_rects)
 
+    @property
+    def pixmap_bytes_used(self) -> int:
+        return self._pixmap_bytes_used
+
     def current_visible_index(self) -> int:
         return self._current_visible_index
 
@@ -142,10 +148,17 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._cancel_pending_requests()
         self._image_list = list(image_list)
         self._pixmaps.clear()
+        self._pixmap_bytes_used = 0
         self._decoded_bounds.clear()
         self._pending_requests.clear()
         self._requested_indices.clear()
         self._failed_indices.clear()
+        retained_paths = set(self._image_list)
+        self._image_sizes = {
+            path: size
+            for path, size in self._image_sizes.items()
+            if path in retained_paths
+        }
 
         # Cache source dimensions
         for path in self._image_list:
@@ -164,6 +177,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._image_list.clear()
         self._image_rects.clear()
         self._pixmaps.clear()
+        self._pixmap_bytes_used = 0
         self._decoded_bounds.clear()
         self._pending_requests.clear()
         self._requested_indices.clear()
@@ -172,6 +186,16 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._pending_scroll_index = None
         self.verticalScrollBar().setRange(0, 0)
         self.horizontalScrollBar().setRange(0, 0)
+        self.viewport().update()
+
+    def release_render_cache(self) -> None:
+        """Release display buffers while preserving the layout and reading position."""
+        self._cancel_pending_requests()
+        self._pixmaps.clear()
+        self._pixmap_bytes_used = 0
+        self._decoded_bounds.clear()
+        self._pending_requests.clear()
+        self._requested_indices.clear()
         self.viewport().update()
 
     def scroll_to_index(self, index: int) -> None:
@@ -310,6 +334,42 @@ class ScrollReaderWidget(QAbstractScrollArea):
         else:
             self.horizontalScrollBar().setRange(0, 0)
 
+    def _capture_resize_anchor(
+        self,
+    ) -> Optional[tuple[int, float, Optional[int]]]:
+        """Capture the page point currently aligned with the viewport top."""
+        if not self._image_rects:
+            return None
+
+        scroll_y = self.verticalScrollBar().value()
+        anchor_index = 0
+        for idx, rect in enumerate(self._image_rects):
+            if rect.y() > scroll_y:
+                break
+            anchor_index = idx
+
+        rect = self._image_rects[anchor_index]
+        offset = max(0, scroll_y - rect.y())
+        if offset <= rect.height():
+            return anchor_index, offset / max(1, rect.height()), None
+
+        return anchor_index, 1.0, offset - rect.height()
+
+    def _restore_resize_anchor(
+        self, anchor: tuple[int, float, Optional[int]]
+    ) -> None:
+        """Restore a captured page point after image dimensions change."""
+        index, relative_offset, spacing_offset = anchor
+        if not (0 <= index < len(self._image_rects)):
+            return
+
+        rect = self._image_rects[index]
+        if spacing_offset is None:
+            target_y = rect.y() + int(round(relative_offset * rect.height()))
+        else:
+            target_y = rect.y() + rect.height() + spacing_offset
+        self.verticalScrollBar().setValue(target_y)
+
     def _on_scroll_changed(self, value: int) -> None:
         """Handle scroll position change: detect current reading image and request previews."""
         if not self._image_rects:
@@ -340,25 +400,14 @@ class ScrollReaderWidget(QAbstractScrollArea):
         if not self._image_rects or not self._pipeline:
             return
 
-        scroll_y = self.verticalScrollBar().value()
-        vp_h = self.viewport().height()
-        vp_bottom = scroll_y + vp_h
-
-        visible_indices = []
-        for i, rect in enumerate(self._image_rects):
-            if rect.y() + rect.height() >= scroll_y and rect.y() <= vp_bottom:
-                visible_indices.append(i)
-
-        if not visible_indices:
-            visible_indices = [self._current_visible_index]
-
+        visible_indices, wanted_indices = self._cache_windows()
         min_vis = min(visible_indices)
         max_vis = max(visible_indices)
-
-        # Prefetch window: 1 above, 2 below
-        prefetch_min = max(0, min_vis - 1)
-        prefetch_max = min(len(self._image_list) - 1, max_vis + 2)
-        wanted_indices = set(range(prefetch_min, prefetch_max + 1))
+        prefetch_min = min(wanted_indices)
+        prefetch_max = max(wanted_indices)
+        self._pipeline.retain_preview_paths(
+            {self._image_list[idx] for idx in wanted_indices}
+        )
 
         # Fast scrolling must not leave an ever-growing low-priority queue. Drop
         # consumers which have moved outside the prefetch window; running image
@@ -381,6 +430,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 max(1, int(round(rect.height() * dpr))),
             )
             priority = 2 if (min_vis <= idx <= max_vis) else 0
+            estimated_bytes = target_bounds.width() * target_bounds.height() * 4
+            if priority == 0 and estimated_bytes > self.PIXMAP_CACHE_BYTES:
+                continue
 
             decoded_bounds = self._decoded_bounds.get(idx)
             if decoded_bounds is not None and self._bounds_cover(
@@ -417,12 +469,71 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 priority=priority,
             )
 
-        # Prune distant cached pixmaps to bound memory usage
-        retained_range = set(range(max(0, min_vis - 5), min(len(self._image_list), max_vis + 6)))
-        for idx in list(self._pixmaps.keys()):
-            if idx not in retained_range:
-                del self._pixmaps[idx]
-                self._decoded_bounds.pop(idx, None)
+        self._prune_pixmaps(visible_indices, wanted_indices)
+
+    def _cache_windows(self) -> tuple[Set[int], Set[int]]:
+        """Return visible pages and the small surrounding prefetch window."""
+        if not self._image_rects:
+            return set(), set()
+
+        scroll_y = self.verticalScrollBar().value()
+        vp_bottom = scroll_y + self.viewport().height()
+        visible_indices = {
+            idx
+            for idx, rect in enumerate(self._image_rects)
+            if rect.y() + rect.height() >= scroll_y and rect.y() <= vp_bottom
+        }
+        if not visible_indices:
+            visible_indices = {self._current_visible_index}
+
+        min_vis = min(visible_indices)
+        max_vis = max(visible_indices)
+        wanted_indices = set(
+            range(
+                max(0, min_vis - 1),
+                min(len(self._image_list), max_vis + 3),
+            )
+        )
+        return visible_indices, wanted_indices
+
+    @staticmethod
+    def _pixmap_bytes(pixmap: QPixmap) -> int:
+        return (
+            max(0, pixmap.width())
+            * max(0, pixmap.height())
+            * max(1, pixmap.depth())
+            // 8
+        )
+
+    def _drop_pixmap(self, idx: int) -> None:
+        pixmap = self._pixmaps.pop(idx, None)
+        if pixmap is not None:
+            self._pixmap_bytes_used -= self._pixmap_bytes(pixmap)
+        self._decoded_bounds.pop(idx, None)
+
+    def _prune_pixmaps(
+        self, visible_indices: Set[int], wanted_indices: Set[int]
+    ) -> None:
+        """Keep visible pages and spend remaining bytes on nearest prefetches."""
+        for idx in list(self._pixmaps):
+            if idx not in wanted_indices:
+                self._drop_pixmap(idx)
+
+        if self._pixmap_bytes_used <= self.PIXMAP_CACHE_BYTES:
+            return
+
+        center = (
+            sum(visible_indices) / len(visible_indices) if visible_indices else 0
+        )
+        evictable = sorted(
+            (idx for idx in self._pixmaps if idx not in visible_indices),
+            key=lambda idx: abs(idx - center),
+            reverse=True,
+        )
+        for idx in evictable:
+            if self._pixmap_bytes_used <= self.PIXMAP_CACHE_BYTES:
+                break
+            self._drop_pixmap(idx)
 
     @staticmethod
     def _bounds_cover(available: QSize, required: QSize) -> bool:
@@ -440,6 +551,13 @@ class ScrollReaderWidget(QAbstractScrollArea):
                     self._pending_requests.pop(idx, None)
         if idx not in self._pending_requests:
             self._requested_indices.discard(idx)
+
+    def _request_is_pending(self, idx: int, bounds: Optional[QSize]) -> bool:
+        if bounds is None:
+            return idx in self._pending_requests
+        return (bounds.width(), bounds.height()) in self._pending_requests.get(
+            idx, {}
+        )
 
     def _cancel_pending_requests(self) -> None:
         if self._pipeline is not None and self._requested_indices:
@@ -459,6 +577,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
             and self._image_list[idx] == request.path
         ):
             return
+        if not self._request_is_pending(idx, request.bounds):
+            return
 
         self._finish_pending_request(idx, request.bounds)
         self._failed_indices.discard(idx)
@@ -472,8 +592,15 @@ class ScrollReaderWidget(QAbstractScrollArea):
         if current_bounds is None or self._bounds_cover(
             fulfilled_bounds, current_bounds
         ):
-            self._pixmaps[idx] = QPixmap.fromImage(result.image)
+            previous = self._pixmaps.get(idx)
+            if previous is not None:
+                self._pixmap_bytes_used -= self._pixmap_bytes(previous)
+            pixmap = QPixmap.fromImage(result.image)
+            self._pixmaps[idx] = pixmap
+            self._pixmap_bytes_used += self._pixmap_bytes(pixmap)
             self._decoded_bounds[idx] = fulfilled_bounds
+            visible_indices, wanted_indices = self._cache_windows()
+            self._prune_pixmaps(visible_indices, wanted_indices)
         self.viewport().update()
 
     def _on_image_failed(self, result: DecodeResult) -> None:
@@ -487,6 +614,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
             0 <= idx < len(self._image_list)
             and self._image_list[idx] == request.path
         ):
+            return
+        if not self._request_is_pending(idx, request.bounds):
             return
 
         self._finish_pending_request(idx, request.bounds)
@@ -547,14 +676,20 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 )
 
     def resizeEvent(self, event: QResizeEvent) -> None:
+        resize_anchor = (
+            None
+            if self._pending_scroll_index is not None
+            else self._capture_resize_anchor()
+        )
         super().resizeEvent(event)
         self._relayout()
         if self._pending_scroll_index is not None:
             self.scroll_to_index(self._pending_scroll_index)
-        else:
-            # Maintain active image in view
-            if 0 <= self._current_visible_index < len(self._image_rects):
-                self._update_visible_images()
+        elif resize_anchor is not None:
+            self._restore_resize_anchor(resize_anchor)
+
+        if 0 <= self._current_visible_index < len(self._image_rects):
+            self._update_visible_images()
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

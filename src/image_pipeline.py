@@ -40,14 +40,80 @@ class ByteBoundedImageCache:
             self._items.move_to_end(key)
         return item
 
+    def get_covering_preview(
+        self, path: str, signature: tuple, bounds: QSize
+    ) -> Optional[CachedImage]:
+        """Return the smallest cached variant that covers the requested preview."""
+        candidates = []
+        for key, item in self._items.items():
+            if (
+                not isinstance(key, tuple)
+                or len(key) < 3
+                or key[0] != path
+                or key[1] != signature
+                or key[2] is None
+            ):
+                continue
+
+            required_size = item.source_size.scaled(
+                bounds, Qt.AspectRatioMode.KeepAspectRatio
+            )
+            if (
+                required_size.width() > item.source_size.width()
+                or required_size.height() > item.source_size.height()
+            ):
+                required_size = item.source_size
+
+            if (
+                item.image.width() >= required_size.width()
+                and item.image.height() >= required_size.height()
+                and int(item.image.sizeInBytes())
+                <= max(1, required_size.width() * required_size.height() * 4) * 2
+            ):
+                candidates.append((int(item.image.sizeInBytes()), key, item))
+
+        if not candidates:
+            return None
+
+        _, key, item = min(candidates, key=lambda candidate: candidate[0])
+        self._items.move_to_end(key)
+        return item
+
     def put(self, key: Hashable, item: CachedImage) -> None:
         image_bytes = int(item.image.sizeInBytes())
+
+        if self.byte_limit == 0 or image_bytes > self.byte_limit:
+            return
+
+        if isinstance(key, tuple) and len(key) >= 3 and key[2] is not None:
+            for existing_key, existing_item in self._items.items():
+                if (
+                    isinstance(existing_key, tuple)
+                    and len(existing_key) >= 3
+                    and existing_key[0] == key[0]
+                    and existing_key[1] == key[1]
+                    and existing_item.image.width() >= item.image.width()
+                    and existing_item.image.height() >= item.image.height()
+                    and int(existing_item.image.sizeInBytes()) <= image_bytes * 2
+                ):
+                    return
+
         previous = self._items.pop(key, None)
         if previous is not None:
             self._bytes -= int(previous.image.sizeInBytes())
 
-        if self.byte_limit == 0 or image_bytes > self.byte_limit:
-            return
+        # Keep only one decoded preview size per file. A covering larger image is
+        # reused by get_covering_preview(), while a newly decoded larger variant
+        # replaces its smaller predecessor.
+        if isinstance(key, tuple) and len(key) >= 3 and key[2] is not None:
+            for existing_key in list(self._items):
+                if (
+                    isinstance(existing_key, tuple)
+                    and existing_key
+                    and existing_key[0] == key[0]
+                ):
+                    evicted = self._items.pop(existing_key)
+                    self._bytes -= int(evicted.image.sizeInBytes())
 
         self._items[key] = item
         self._bytes += image_bytes
@@ -154,7 +220,7 @@ class ImagePipeline(QObject):
     image_ready = pyqtSignal(object)
     image_failed = pyqtSignal(object)
 
-    PREVIEW_CACHE_BYTES = 96 * MIB
+    PREVIEW_CACHE_BYTES = 64 * MIB
     MAX_FULL_IMAGE_BYTES = 256 * MIB
 
     def __init__(self, parent: Optional[QObject] = None):
@@ -292,6 +358,10 @@ class ImagePipeline(QObject):
 
         if bounds is not None:
             cached = self.preview_cache.get(cache_key)
+            if cached is None:
+                cached = self.preview_cache.get_covering_preview(
+                    absolute_path, signature, bounds
+                )
             if cached is not None:
                 result = DecodeResult(
                     request, cached.image, QSize(cached.source_size)
@@ -328,7 +398,11 @@ class ImagePipeline(QObject):
             result.request.cache_key, [result.request]
         )
 
-        if result.succeeded and result.request.bounds is not None:
+        if (
+            waiting_requests
+            and result.succeeded
+            and result.request.bounds is not None
+        ):
             self.preview_cache.put(
                 result.request.cache_key,
                 CachedImage(result.image, QSize(result.source_size)),

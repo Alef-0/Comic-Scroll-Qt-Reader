@@ -187,6 +187,7 @@ class MainWindow(QMainWindow):
         if mode == ViewerMode.SINGLE:
             # Sync active index from scroll reader to single image viewer
             idx = self.scroll_reader.current_visible_index()
+            self.scroll_reader.release_render_cache()
             if 0 <= idx < len(self.image_list):
                 self.current_index = idx
                 self._request_index(idx, force=True)
@@ -194,6 +195,19 @@ class MainWindow(QMainWindow):
             self.image_viewer.setFocus()
         elif mode == ViewerMode.SCROLL:
             # Sync active index from single image viewer to scroll reader
+            self._request_generation += 1
+            self._requested_index = None
+            self._full_request_pending = False
+            self._refine_request_key = None
+            self._image_pipeline.cancel_queued(
+                {
+                    "current-preview",
+                    "refined-preview",
+                    "current-full",
+                    "prefetch-preview",
+                }
+            )
+            self.image_viewer.release_render_cache()
             self._stack.setCurrentWidget(self.scroll_reader)
             self.scroll_reader.setFocus()
             if 0 <= self.current_index < len(self.image_list):
@@ -484,9 +498,16 @@ class MainWindow(QMainWindow):
             return
         if not (0 <= self.current_index < len(self.image_list)):
             return
+        bounds = self.image_viewer.detail_bounds()
+        if not bounds.isValid():
+            return
         self._full_request_pending = True
-        self._image_pipeline.request_full(
-            self.image_list[self.current_index], self._request_generation
+        self._image_pipeline.request_preview(
+            self.image_list[self.current_index],
+            bounds,
+            self._request_generation,
+            purpose="current-full",
+            priority=1,
         )
 
     def _prefetch_neighbours(self) -> None:

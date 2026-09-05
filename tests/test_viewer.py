@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QImage, QPixmap, QColor, QKeyEvent
+from PyQt6.QtGui import QImage, QPixmap, QColor, QKeyEvent, QMouseEvent
 from PyQt6.QtCore import Qt, QSize, QRect, QPointF, QEventLoop, QTimer
 
 from src.viewer import (
@@ -168,39 +168,86 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertLess(rect_out.width(), rect_initial.width())
         self.assertAlmostEqual(rect_out.width() / rect_out.height(), 2.0)
 
-    def test_area_zoom_anchored_position(self):
-        """Zooming in on an area keeps the point under the cursor stationary."""
+    def test_mouse_position_does_not_decenter_zoom(self):
+        """Single-view zoom remains centred regardless of the mouse position."""
         img = QImage(400, 200, QImage.Format.Format_RGB32)
         self.viewer.set_pixmap(QPixmap.fromImage(img))
-        # Initial fit in 800x600: 800x400, centered at (0, 100)
         anchor = QPointF(200, 200)
 
-        # Point in image relative to rect before zoom
-        rect_before = self.viewer.target_rect()
-        norm_x = (anchor.x() - rect_before.x()) / rect_before.width()
-        norm_y = (anchor.y() - rect_before.y()) / rect_before.height()
-
-        # Zoom 2x at anchor
         self.viewer.zoom_at(2.0, anchor)
         rect_after = self.viewer.target_rect()
 
-        # Check that the same normalized image point is still at anchor.x, anchor.y
-        recomputed_anchor_x = rect_after.x() + norm_x * rect_after.width()
-        recomputed_anchor_y = rect_after.y() + norm_y * rect_after.height()
+        self.assertAlmostEqual(
+            rect_after.x() + rect_after.width() / 2.0,
+            self.viewer.width() / 2.0,
+            delta=1.0,
+        )
+        self.assertAlmostEqual(
+            rect_after.y() + rect_after.height() / 2.0,
+            self.viewer.height() / 2.0,
+            delta=1.0,
+        )
 
-        self.assertAlmostEqual(recomputed_anchor_x, anchor.x(), delta=1.0)
-        self.assertAlmostEqual(recomputed_anchor_y, anchor.y(), delta=1.0)
-
-    def test_pan_by_updates_target_rect(self):
-        """Panning shifts target rect coordinates directly."""
+    def test_fit_image_cannot_be_panned(self):
+        """An image contained by the viewport remains centred when dragged."""
         img = QImage(200, 200, QImage.Format.Format_RGB32)
         self.viewer.set_pixmap(QPixmap.fromImage(img))
         rect1 = self.viewer.target_rect()
 
         self.viewer.pan_by(50, -30)
-        rect2 = self.viewer.target_rect()
-        self.assertEqual(rect2.x(), rect1.x() + 50)
-        self.assertEqual(rect2.y(), rect1.y() - 30)
+
+        self.assertEqual(self.viewer.target_rect(), rect1)
+        self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
+
+    def test_pan_is_clamped_and_non_overflowing_axis_stays_centred(self):
+        """Dragging cannot expose canvas, and a fitting axis does not move."""
+        img = QImage(400, 200, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+        self.viewer.zoom_in()  # 1000x500 in an 800x600 viewport
+
+        self.viewer.pan_by(1000, 1000)
+        rect = self.viewer.target_rect()
+
+        self.assertEqual(self.viewer.pan_offset, QPointF(100, 0))
+        self.assertEqual(rect.x(), 0)
+        self.assertEqual(rect.y(), 50)
+
+        self.viewer.pan_by(-2000, -2000)
+        rect = self.viewer.target_rect()
+        self.assertEqual(self.viewer.pan_offset, QPointF(-100, 0))
+        self.assertEqual(rect.x() + rect.width(), self.viewer.width())
+
+    def test_zooming_back_to_fit_recentres_image(self):
+        """Zooming out clears pan once the image fits the viewport again."""
+        img = QImage(400, 200, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+        self.viewer.zoom_at(2.0, QPointF(100, 100))
+        self.viewer.pan_by(200, 100)
+
+        self.viewer.zoom_at(0.5, QPointF(700, 500))
+
+        self.assertEqual(self.viewer.zoom_factor, 1.0)
+        self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
+        self.assertEqual(self.viewer.target_rect(), QRect(0, 100, 800, 400))
+
+    def test_left_drag_only_activates_when_image_overflows(self):
+        """The single viewer does not enter dragging state at fit size."""
+        img = QImage(400, 200, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(img))
+        press = QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress,
+            QPointF(100, 100),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        self.viewer.mousePressEvent(press)
+        self.assertFalse(self.viewer._controls.is_dragging)
+
+        self.viewer.zoom_in()
+        self.viewer.mousePressEvent(press)
+        self.assertTrue(self.viewer._controls.is_dragging)
 
     def test_reset_view(self):
         """reset_view resets zoom factor to 1.0 and pan offset to 0."""
@@ -215,7 +262,7 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
 
     def test_zoom_requests_full_resolution_after_interaction(self):
-        """Zooming beyond available preview pixels requests the original once settled."""
+        """Zooming beyond available preview pixels requests more detail once settled."""
         preview = QImage(800, 400, QImage.Format.Format_RGB32)
         self.viewer.set_preview_pixmap(
             QPixmap.fromImage(preview),
@@ -229,6 +276,22 @@ class TestImageViewerWidget(unittest.TestCase):
         self.viewer._finish_interaction()
 
         self.assertEqual(requests, [True])
+
+    def test_detail_decode_is_capped_by_byte_budget(self):
+        preview = QImage(800, 800, QImage.Format.Format_RGB32)
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(preview),
+            QSize(30000, 30000),
+            "/tmp/large.png",
+        )
+
+        self.viewer.zoom_at(self.viewer.MAX_ZOOM)
+        bounds = self.viewer.detail_bounds()
+
+        self.assertLessEqual(
+            bounds.width() * bounds.height() * 4,
+            self.viewer.DETAIL_BUFFER_BYTES,
+        )
 
 
 class TestByteBoundedImageCache(unittest.TestCase):
@@ -244,6 +307,29 @@ class TestByteBoundedImageCache(unittest.TestCase):
         self.assertIsNone(cache.get(("a",)))
         self.assertIsNotNone(cache.get(("b",)))
         self.assertLessEqual(cache.bytes_used, cache.byte_limit)
+
+    def test_cache_keeps_one_covering_preview_per_file(self):
+        path = "/tmp/page.png"
+        signature = (1, 1)
+        source_size = QSize(400, 800)
+        small = QImage(60, 120, QImage.Format.Format_ARGB32)
+        large = QImage(80, 160, QImage.Format.Format_ARGB32)
+        cache = ByteBoundedImageCache(int(large.sizeInBytes()) * 2)
+
+        cache.put(
+            (path, signature, (60, 120)), CachedImage(small, source_size)
+        )
+        cache.put(
+            (path, signature, (80, 160)), CachedImage(large, source_size)
+        )
+        cache.put(
+            (path, signature, (60, 120)), CachedImage(small, source_size)
+        )
+
+        cached = cache.get_covering_preview(path, signature, QSize(60, 120))
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.image.size(), large.size())
+        self.assertEqual(cache.bytes_used, int(large.sizeInBytes()))
 
 
 class TestImagePipelineCancellation(unittest.TestCase):
@@ -276,6 +362,25 @@ class TestImagePipelineCancellation(unittest.TestCase):
 
         self.assertIn(1, pipeline._workers)
         self.assertEqual(pipeline._inflight_waiters[cache_key], [scroll_request])
+
+    def test_cancelled_running_result_is_not_cached(self):
+        pipeline = ImagePipeline()
+        cache_key = ("/tmp/page.png", (1, 1), (40, 40))
+        request = DecodeRequest(
+            1,
+            "/tmp/page.png",
+            "current-preview",
+            QSize(40, 40),
+            cache_key,
+        )
+        pipeline._inflight_waiters[cache_key] = []
+        image = QImage(40, 40, QImage.Format.Format_ARGB32)
+
+        pipeline._on_finished(
+            1, DecodeResult(request, image, QSize(40, 40))
+        )
+
+        self.assertEqual(pipeline.preview_cache.bytes_used, 0)
 
 
 class TestMainWindow(unittest.TestCase):

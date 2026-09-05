@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from PyQt6.QtCore import QEventLoop, QObject, QPointF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QWheelEvent
+from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 from src.scroll_reader import ScrollReaderWidget
@@ -68,6 +68,9 @@ class RecordingPipeline(QObject):
 
     def cancel_queued(self, purposes=None):
         self.cancellations.append(set(purposes) if purposes is not None else None)
+
+    def retain_preview_paths(self, paths):
+        pass
 
 
 class TestScrollReaderRequestLifecycle(unittest.TestCase):
@@ -150,6 +153,73 @@ class TestScrollReaderRequestLifecycle(unittest.TestCase):
         cancelled_purposes = set().union(*self.pipeline.cancellations)
         self.assertIn("scroll-0", cancelled_purposes)
         self.assertIn("scroll-1", cancelled_purposes)
+
+    def test_resize_preserves_page_position_at_viewport_top(self):
+        """Width-driven relayout does not vertically roll the visible content."""
+        self.widget.show()
+        app.processEvents()
+        self.widget.resize(400, 300)
+        app.processEvents()
+        self.widget.set_images(self.image_paths)
+        old_rect = self.widget.image_rects[2]
+        old_relative_offset = 0.4
+        self.widget.verticalScrollBar().setValue(
+            old_rect.y() + int(round(old_rect.height() * old_relative_offset))
+        )
+
+        self.widget.resize(700, 300)
+        app.processEvents()
+
+        new_rect = self.widget.image_rects[2]
+        new_relative_offset = (
+            self.widget.verticalScrollBar().value() - new_rect.y()
+        ) / new_rect.height()
+        self.assertGreater(new_rect.width(), old_rect.width())
+        self.assertAlmostEqual(
+            new_relative_offset, old_relative_offset, delta=2 / new_rect.height()
+        )
+
+    def test_pixmap_cache_is_byte_bounded_and_keeps_visible_page(self):
+        """Prefetched pixmaps yield to the visible page when the byte budget is full."""
+        self.widget.set_images(self.image_paths)
+        initial_requests = list(self.pipeline.requests)
+        visible_request = next(
+            request for request in initial_requests if request["request_id"] == 0
+        )
+        visible_result = self.result_for(visible_request)
+        self.widget.PIXMAP_CACHE_BYTES = self.widget._pixmap_bytes(
+            QPixmap.fromImage(visible_result.image)
+        )
+
+        for request in initial_requests:
+            self.widget._on_image_ready(self.result_for(request))
+
+        self.assertIn(0, self.widget._pixmaps)
+        self.assertLessEqual(
+            self.widget.pixmap_bytes_used, self.widget.PIXMAP_CACHE_BYTES
+        )
+
+    def test_oversized_visible_page_is_the_budget_exception(self):
+        """The active page remains drawable even when it alone exceeds the budget."""
+        self.widget.set_images([self.image_paths[0]])
+        request = self.pipeline.requests[-1]
+        self.widget.PIXMAP_CACHE_BYTES = 1
+
+        self.widget._on_image_ready(self.result_for(request))
+
+        self.assertIn(0, self.widget._pixmaps)
+        self.assertGreater(
+            self.widget.pixmap_bytes_used, self.widget.PIXMAP_CACHE_BYTES
+        )
+
+    def test_release_render_cache_resets_pixmap_accounting(self):
+        self.widget.set_images([self.image_paths[0]])
+        self.widget._on_image_ready(self.result_for(self.pipeline.requests[-1]))
+
+        self.widget.release_render_cache()
+
+        self.assertEqual(self.widget._pixmaps, {})
+        self.assertEqual(self.widget.pixmap_bytes_used, 0)
 
 
 class TestScrollReaderWidget(unittest.TestCase):

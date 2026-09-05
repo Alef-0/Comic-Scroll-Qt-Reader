@@ -36,6 +36,7 @@ class ImageViewerWidget(QWidget):
     MIN_ZOOM = 0.1
     MAX_ZOOM = 50.0
     QUALITY_DELAY_MS = 100
+    DETAIL_BUFFER_BYTES = 64 * 1024 * 1024
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,6 +119,8 @@ class ImageViewerWidget(QWidget):
             if not self._full_resolution_needed():
                 self._quality_timer.stop()
         else:
+            self._clamp_pan_offset()
+            self._update_pan_cursor()
             self.update()
 
     def set_refined_preview_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
@@ -141,6 +144,15 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = None
         self.update()
 
+    def release_render_cache(self) -> None:
+        """Drop all decoded buffers when this viewer is not the active mode."""
+        self._preview_pixmap = None
+        self._full_pixmap = None
+        self._source_size = QSize()
+        self._image_path = None
+        self._quality_timer.stop()
+        self.update()
+
     def clear(self):
         """Clear current image and repaint empty canvas."""
         self._preview_pixmap = None
@@ -161,69 +173,39 @@ class ImageViewerWidget(QWidget):
         self._schedule_quality_update()
 
     def pan_by(self, delta_x: float, delta_y: float):
-        """Translate the image by a given delta offset."""
+        """Pan only across overflowing pixels without exposing empty canvas."""
+        if not self._can_pan():
+            return
+
+        previous_offset = QPointF(self._pan_offset)
         self._pan_offset += QPointF(delta_x, delta_y)
+        self._clamp_pan_offset()
+        if self._pan_offset == previous_offset:
+            return
+
         self._begin_interaction()
         self.update()
 
     def zoom_at(self, scale_factor: float, anchor_pos: Optional[QPointF] = None):
-        """Zoom in or out anchored around a specific widget coordinate, preserving aspect ratio."""
+        """Zoom around the viewport centre while preserving aspect ratio."""
         if not self._has_image():
             return
-
-        w_size = self.size()
-        if w_size.width() <= 0 or w_size.height() <= 0:
-            return
-
-        base_size = self._source_size.scaled(
-            w_size, Qt.AspectRatioMode.KeepAspectRatio
-        )
-        base_w = base_size.width()
-        base_h = base_size.height()
-        if base_w <= 0 or base_h <= 0:
-            return
-
-        cur_w = base_w * self._zoom_factor
-        cur_h = base_h * self._zoom_factor
-        cur_x = (w_size.width() - cur_w) / 2.0 + self._pan_offset.x()
-        cur_y = (w_size.height() - cur_h) / 2.0 + self._pan_offset.y()
-
-        if anchor_pos is None:
-            ax = w_size.width() / 2.0
-            ay = w_size.height() / 2.0
-        else:
-            ax = anchor_pos.x()
-            ay = anchor_pos.y()
-
-        # Normalized coordinates relative to the current image rectangle
-        fx = (ax - cur_x) / cur_w
-        fy = (ay - cur_y) / cur_h
 
         new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self._zoom_factor * scale_factor))
         if abs(new_zoom - self._zoom_factor) < 1e-6:
             return
 
-        new_w = base_w * new_zoom
-        new_h = base_h * new_zoom
-
-        # Maintain anchor point stationary
-        new_x = ax - fx * new_w
-        new_y = ay - fy * new_h
-
-        new_pan_x = new_x - (w_size.width() - new_w) / 2.0
-        new_pan_y = new_y - (w_size.height() - new_h) / 2.0
-
+        zoom_ratio = new_zoom / self._zoom_factor
+        self._pan_offset = QPointF(
+            self._pan_offset.x() * zoom_ratio,
+            self._pan_offset.y() * zoom_ratio,
+        )
         self._zoom_factor = new_zoom
-        self._pan_offset = QPointF(new_pan_x, new_pan_y)
+        self._clamp_pan_offset()
         self._begin_interaction()
 
-        # Update cursor shape when zoomed in
-        if not self._controls.is_dragging:
-            self.setCursor(
-                Qt.CursorShape.OpenHandCursor
-                if self._zoom_factor > 1.0
-                else Qt.CursorShape.ArrowCursor
-            )
+        # Only advertise dragging when at least one image axis overflows.
+        self._update_pan_cursor()
 
         self.update()
         self.zoom_changed.emit(self._zoom_factor)
@@ -280,6 +262,8 @@ class ImageViewerWidget(QWidget):
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
         if self._has_image():
+            self._clamp_pan_offset()
+            self._update_pan_cursor()
             self._begin_interaction()
 
     def _has_image(self) -> bool:
@@ -289,6 +273,40 @@ class ImageViewerWidget(QWidget):
             and self._source_size.isValid()
         )
 
+    def _pan_limits(self) -> QPointF:
+        """Return maximum centred pan offsets for the current scaled image."""
+        if not self._has_image() or self.width() <= 0 or self.height() <= 0:
+            return QPointF(0.0, 0.0)
+
+        base_size = self._source_size.scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatio
+        )
+        scaled_width = base_size.width() * self._zoom_factor
+        scaled_height = base_size.height() * self._zoom_factor
+        return QPointF(
+            max(0.0, (scaled_width - self.width()) / 2.0),
+            max(0.0, (scaled_height - self.height()) / 2.0),
+        )
+
+    def _can_pan(self) -> bool:
+        limits = self._pan_limits()
+        return limits.x() > 0.0 or limits.y() > 0.0
+
+    def _clamp_pan_offset(self) -> None:
+        limits = self._pan_limits()
+        self._pan_offset = QPointF(
+            max(-limits.x(), min(limits.x(), self._pan_offset.x())),
+            max(-limits.y(), min(limits.y(), self._pan_offset.y())),
+        )
+
+    def _update_pan_cursor(self) -> None:
+        if not self._controls.is_dragging:
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor
+                if self._can_pan()
+                else Qt.CursorShape.ArrowCursor
+            )
+
     def _required_pixel_size(self) -> QSize:
         rect = self.target_rect()
         dpr = self.devicePixelRatioF()
@@ -297,17 +315,46 @@ class ImageViewerWidget(QWidget):
             max(1, int(round(rect.height() * dpr))),
         )
 
+    def detail_bounds(self) -> QSize:
+        """Return the useful zoom decode size, capped by the detail byte budget."""
+        if not self._has_image():
+            return QSize()
+
+        desired = self._source_size.scaled(
+            self._required_pixel_size(), Qt.AspectRatioMode.KeepAspectRatio
+        )
+        if (
+            desired.width() > self._source_size.width()
+            or desired.height() > self._source_size.height()
+        ):
+            desired = QSize(self._source_size)
+
+        estimated_bytes = desired.width() * desired.height() * 4
+        if estimated_bytes > self.DETAIL_BUFFER_BYTES:
+            scale = (self.DETAIL_BUFFER_BYTES / estimated_bytes) ** 0.5
+            desired = QSize(
+                max(1, int(desired.width() * scale)),
+                max(1, int(desired.height() * scale)),
+            )
+        return desired
+
     def _full_resolution_needed(self) -> bool:
         if not self._has_image():
             return False
-        required = self._required_pixel_size()
+        required = self.detail_bounds()
         preview_size = self._preview_pixmap.size()
         return (
             required.width() > preview_size.width()
             or required.height() > preview_size.height()
-        ) and (
-            self._source_size.width() > preview_size.width()
-            or self._source_size.height() > preview_size.height()
+        )
+
+    def _detail_pixmap_covers_request(self) -> bool:
+        if self._full_pixmap is None:
+            return False
+        required = self.detail_bounds()
+        return (
+            self._full_pixmap.width() >= required.width()
+            and self._full_pixmap.height() >= required.height()
         )
 
     def _active_pixmap(self) -> Optional[QPixmap]:
@@ -330,11 +377,17 @@ class ImageViewerWidget(QWidget):
             return
         if self._zoom_factor <= 1.0:
             self.preview_size_requested.emit(self.preview_bounds())
-        elif self._full_pixmap is None and self._full_resolution_needed():
+        elif (
+            self._full_resolution_needed()
+            and not self._detail_pixmap_covers_request()
+        ):
             self.full_resolution_requested.emit()
 
     # Mouse and wheel event handlers delegated to CommonViewerControls
     def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and not self._can_pan():
+            super().mousePressEvent(event)
+            return
         if not self._controls.handle_mouse_press(event):
             super().mousePressEvent(event)
 
@@ -344,7 +397,7 @@ class ImageViewerWidget(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if not self._controls.handle_mouse_release(
-            event, is_zoomed=(self._zoom_factor > 1.0)
+            event, is_zoomed=self._can_pan()
         ):
             super().mouseReleaseEvent(event)
 
