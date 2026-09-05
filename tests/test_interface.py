@@ -169,6 +169,19 @@ class TestViewerHud(unittest.TestCase):
         self.hud.set_zoom(1.5)
         self.assertEqual(self.hud.btn_zoom_label.text(), "150%")
 
+    def test_comic_mode_selector_and_choices_keep_one_width(self):
+        selector_width = self.hud.btn_comic_mode.width()
+        self.assertEqual(self.hud._comic_menu.width(), selector_width)
+
+        for mode in ("comics", "manga", "webtoon", "custom"):
+            self.hud.set_comic_mode(mode)
+            self.assertEqual(self.hud.btn_comic_mode.width(), selector_width)
+
+        self.assertEqual(
+            [action.text() for action in self.hud._comic_menu.actions()],
+            ["📚 Comics", "📖 Manga", "📱 Webtoon"],
+        )
+
     def test_fullscreen_display(self):
         self.hud.set_fullscreen(True)
         self.assertEqual(self.hud.btn_fullscreen.text(), "🗗")

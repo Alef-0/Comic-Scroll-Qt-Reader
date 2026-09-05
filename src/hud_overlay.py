@@ -38,6 +38,12 @@ class ViewerHud(QWidget):
     HIDE_DELAY_MS = 900
     FADE_DURATION_MS = 350
     ACTIVATION_MARGIN = 28
+    COMIC_MODE_LABELS = {
+        "comics": "📚 Comics",
+        "manga": "📖 Manga",
+        "webtoon": "📱 Webtoon",
+        "custom": "🛠 Custom",
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -147,25 +153,22 @@ class ViewerHud(QWidget):
         self.btn_comic_mode.setToolTip("Choose a comic reading layout")
         self.btn_comic_mode.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_comic_mode.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        comic_menu = QMenu(self.btn_comic_mode)
-        comic_menu.setStyleSheet(
+        self._comic_menu = QMenu(self.btn_comic_mode)
+        self._comic_menu.setStyleSheet(
             "QMenu { background-color: #2b2b2b; color: #e0e0e0; "
             "border: 1px solid #444; }"
             "QMenu::item { padding: 6px 24px 6px 20px; }"
             "QMenu::item:selected { background-color: #4a90e2; color: #fff; }"
         )
-        for label, mode in (
-            ("Comics", "comics"),
-            ("Manga", "manga"),
-            ("Webtoon", "webtoon"),
-        ):
-            action = comic_menu.addAction(label)
+        for mode in ("comics", "manga", "webtoon"):
+            action = self._comic_menu.addAction(self.COMIC_MODE_LABELS[mode])
             action.triggered.connect(
                 lambda _checked=False, selected=mode: self.comic_mode_selected.emit(
                     selected
                 )
             )
-        self.btn_comic_mode.setMenu(comic_menu)
+        self.btn_comic_mode.setMenu(self._comic_menu)
+        self._reserve_comic_mode_width()
         pill_layout.addWidget(self.btn_comic_mode)
 
         # Separator
@@ -253,14 +256,24 @@ class ViewerHud(QWidget):
             self.btn_fullscreen.setToolTip("Enter Fullscreen (F11 or F)")
 
     def set_comic_mode(self, mode: str) -> None:
-        labels = {
-            "comics": "📚 Comics",
-            "manga": "📖 Manga",
-            "webtoon": "📱 Webtoon",
-            "custom": "🛠 Custom",
-        }
-        self.btn_comic_mode.setText(labels.get(mode, labels["custom"]))
+        self.btn_comic_mode.setText(
+            self.COMIC_MODE_LABELS.get(mode, self.COMIC_MODE_LABELS["custom"])
+        )
         self.adjustSize()
+
+    def _reserve_comic_mode_width(self) -> None:
+        """Keep the selector and its popup stable at the widest choice width."""
+        metrics = self.btn_comic_mode.fontMetrics()
+        widest_label = max(
+            metrics.horizontalAdvance(label)
+            for label in self.COMIC_MODE_LABELS.values()
+        )
+        # Space for the HUD padding and QToolButton's menu indicator. The popup
+        # uses the same fixed width so it aligns with the selector instead of
+        # changing width with the active choice.
+        selector_width = widest_label + 48
+        self.btn_comic_mode.setFixedWidth(selector_width)
+        self._comic_menu.setFixedWidth(selector_width)
 
     def reposition(self, parent_width: int, parent_height: int):
         """Center the HUD horizontally near the bottom of the parent window."""

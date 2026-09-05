@@ -1,5 +1,6 @@
 """Continuous vertical scroll reader widget using Qt6."""
 
+import math
 import os
 from typing import Dict, List, Optional, Set
 
@@ -53,6 +54,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
     MAX_ZOOM = 20.0
     SCROLL_STEP = 60
     PIXMAP_CACHE_BYTES = 64 * MIB
+    BASE_PIXMAP_CACHE_BYTES = 32 * MIB
+    BASE_PREVIEW_MAX_WIDTH = 128
 
     def __init__(self, parent=None, pipeline: Optional[ImagePipeline] = None):
         super().__init__(parent)
@@ -88,9 +91,12 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._image_rects: List[QRect] = []
         self._pixmaps: Dict[int, QPixmap] = {}
         self._pixmap_bytes_used = 0
+        self._base_pixmaps: Dict[int, QPixmap] = {}
+        self._base_pixmap_bytes_used = 0
         self._decoded_bounds: Dict[int, QSize] = {}
         self._pending_requests: Dict[int, Dict[tuple[int, int], int]] = {}
         self._requested_indices: Set[int] = set()
+        self._base_pending_indices: Set[int] = set()
         self._failed_indices: Set[int] = set()
 
         self._zoom_factor: float = 1.0
@@ -147,6 +153,10 @@ class ScrollReaderWidget(QAbstractScrollArea):
         return self._pixmap_bytes_used
 
     @property
+    def base_pixmap_bytes_used(self) -> int:
+        return self._base_pixmap_bytes_used
+
+    @property
     def double_page(self) -> bool:
         return self._double_page
 
@@ -193,12 +203,16 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def set_images(self, image_list: List[str], start_index: int = 0) -> None:
         """Set image list and initialize layout, scrolling to start_index."""
         self._cancel_pending_requests()
+        self._cancel_base_requests()
         self._image_list = list(image_list)
         self._pixmaps.clear()
         self._pixmap_bytes_used = 0
+        self._base_pixmaps.clear()
+        self._base_pixmap_bytes_used = 0
         self._decoded_bounds.clear()
         self._pending_requests.clear()
         self._requested_indices.clear()
+        self._base_pending_indices.clear()
         self._failed_indices.clear()
         retained_paths = set(self._image_list)
         self._image_sizes = {
@@ -213,6 +227,11 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
         self._relayout()
 
+        initial_index = (
+            start_index if 0 <= start_index < len(self._image_list) else 0
+        )
+        self._queue_base_previews(initial_index)
+
         if 0 <= start_index < len(self._image_list):
             self.scroll_to_index(start_index)
         else:
@@ -221,13 +240,17 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def clear(self) -> None:
         """Clear all images and reset layout."""
         self._cancel_pending_requests()
+        self._cancel_base_requests()
         self._image_list.clear()
         self._image_rects.clear()
         self._pixmaps.clear()
         self._pixmap_bytes_used = 0
+        self._base_pixmaps.clear()
+        self._base_pixmap_bytes_used = 0
         self._decoded_bounds.clear()
         self._pending_requests.clear()
         self._requested_indices.clear()
+        self._base_pending_indices.clear()
         self._failed_indices.clear()
         self._current_visible_index = 0
         self._pending_scroll_index = None
@@ -236,7 +259,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self.viewport().update()
 
     def release_render_cache(self) -> None:
-        """Release display buffers while preserving the layout and reading position."""
+        """Release sharp buffers while retaining the lightweight book fallback."""
         self._cancel_pending_requests()
         self._pixmaps.clear()
         self._pixmap_bytes_used = 0
@@ -548,10 +571,6 @@ class ScrollReaderWidget(QAbstractScrollArea):
             return
 
         visible_indices, wanted_indices = self._cache_windows()
-        min_vis = min(visible_indices)
-        max_vis = max(visible_indices)
-        prefetch_min = min(wanted_indices)
-        prefetch_max = max(wanted_indices)
         self._pipeline.retain_preview_paths(
             {self._image_list[idx] for idx in wanted_indices}
         )
@@ -570,13 +589,30 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
         dpr = self.devicePixelRatioF()
 
-        for idx in range(prefetch_min, prefetch_max + 1):
+        visible_rows = {self._image_rects[idx].y() for idx in visible_indices}
+        first_visible_y = min(visible_rows)
+        last_visible_y = max(visible_rows)
+
+        def request_order(idx: int) -> tuple[int, int, int]:
+            row_y = self._image_rects[idx].y()
+            if row_y in visible_rows:
+                return 0, row_y, idx
+            if row_y > last_visible_y:
+                return 1, row_y - last_visible_y, idx
+            return 2, first_visible_y - row_y, idx
+
+        visible_first = sorted(
+            wanted_indices,
+            key=request_order,
+        )
+
+        for idx in visible_first:
             rect = self._image_rects[idx]
             target_bounds = QSize(
                 max(1, int(round(rect.width() * dpr))),
                 max(1, int(round(rect.height() * dpr))),
             )
-            priority = 2 if (min_vis <= idx <= max_vis) else 0
+            priority = 2 if idx in visible_indices else 0
             estimated_bytes = target_bounds.width() * target_bounds.height() * 4
             if priority == 0 and estimated_bytes > self.PIXMAP_CACHE_BYTES:
                 continue
@@ -619,29 +655,101 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._prune_pixmaps(visible_indices, wanted_indices)
 
     def _cache_windows(self) -> tuple[Set[int], Set[int]]:
-        """Return visible pages and the small surrounding prefetch window."""
+        """Return visible pages and complete nearby rows for spread preloading."""
         if not self._image_rects:
             return set(), set()
 
         scroll_y = self.verticalScrollBar().value()
         vp_bottom = scroll_y + self.viewport().height()
-        visible_indices = {
-            idx
-            for idx, rect in enumerate(self._image_rects)
-            if rect.y() + rect.height() >= scroll_y and rect.y() <= vp_bottom
-        }
-        if not visible_indices:
-            visible_indices = {self._current_visible_index}
+        rows: List[Set[int]] = []
+        for idx, rect in enumerate(self._image_rects):
+            if not rows or self._image_rects[next(iter(rows[-1]))].y() != rect.y():
+                rows.append(set())
+            rows[-1].add(idx)
 
-        min_vis = min(visible_indices)
-        max_vis = max(visible_indices)
-        wanted_indices = set(
-            range(
-                max(0, min_vis - 1),
-                min(len(self._image_list), max_vis + 3),
+        visible_row_positions = [
+            row_position
+            for row_position, row in enumerate(rows)
+            if any(
+                self._image_rects[idx].y() + self._image_rects[idx].height()
+                >= scroll_y
+                and self._image_rects[idx].y() <= vp_bottom
+                for idx in row
             )
+        ]
+        if not visible_row_positions:
+            visible_row_positions = [
+                next(
+                    (
+                        position
+                        for position, row in enumerate(rows)
+                        if self._current_visible_index in row
+                    ),
+                    0,
+                )
+            ]
+
+        first_visible_row = min(visible_row_positions)
+        last_visible_row = max(visible_row_positions)
+        visible_indices = set().union(
+            *(rows[position] for position in visible_row_positions)
+        )
+        # One complete row behind and two complete rows ahead. In double-page
+        # layouts this always schedules both pages of each spread together.
+        wanted_indices = set().union(
+            *rows[
+                max(0, first_visible_row - 1) : min(
+                    len(rows), last_visible_row + 3
+                )
+            ]
         )
         return visible_indices, wanted_indices
+
+    def _queue_base_previews(self, initial_index: int) -> None:
+        """Build a tiny persistent fallback for every page in the book."""
+        if not self._image_list or not self._pipeline:
+            return
+
+        aspect_sum = sum(
+            max(1, self._get_source_size(path).height())
+            / max(1, self._get_source_size(path).width())
+            for path in self._image_list
+        )
+        byte_budget = max(1, int(self.BASE_PIXMAP_CACHE_BYTES * 0.9))
+        base_width = min(
+            self.BASE_PREVIEW_MAX_WIDTH,
+            max(1, int(math.sqrt(byte_budget / max(4.0, aspect_sum * 4.0)))),
+        )
+
+        initial_y = self._image_rects[initial_index].y()
+        initial_row = [
+            idx
+            for idx, rect in enumerate(self._image_rects)
+            if rect.y() == initial_y
+        ]
+        ordered_indices = initial_row + [
+            idx for idx in range(len(self._image_list)) if idx not in initial_row
+        ]
+        for idx in ordered_indices:
+            source_size = self._get_source_size(self._image_list[idx])
+            base_height = max(
+                1,
+                int(
+                    round(
+                        base_width
+                        * max(1, source_size.height())
+                        / max(1, source_size.width())
+                    )
+                ),
+            )
+            self._base_pending_indices.add(idx)
+            self._pipeline.request_preview(
+                self._image_list[idx],
+                QSize(base_width, base_height),
+                request_id=idx,
+                purpose=f"scroll-base-{idx}",
+                priority=1 if idx in initial_row else -1,
+            )
 
     @staticmethod
     def _pixmap_bytes(pixmap: QPixmap) -> int:
@@ -712,9 +820,36 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 {f"scroll-{idx}" for idx in self._requested_indices}
             )
 
+    def _cancel_base_requests(self) -> None:
+        if self._pipeline is not None and self._base_pending_indices:
+            self._pipeline.cancel_queued(
+                {f"scroll-base-{idx}" for idx in self._base_pending_indices}
+            )
+
+    def _on_base_image_ready(self, result: DecodeResult) -> None:
+        idx = result.request.request_id
+        if not (
+            idx in self._base_pending_indices
+            and 0 <= idx < len(self._image_list)
+            and self._image_list[idx] == result.request.path
+        ):
+            return
+
+        self._base_pending_indices.discard(idx)
+        previous = self._base_pixmaps.get(idx)
+        if previous is not None:
+            self._base_pixmap_bytes_used -= self._pixmap_bytes(previous)
+        pixmap = QPixmap.fromImage(result.image)
+        self._base_pixmaps[idx] = pixmap
+        self._base_pixmap_bytes_used += self._pixmap_bytes(pixmap)
+        self.viewport().update()
+
     def _on_image_ready(self, result: DecodeResult) -> None:
         """Receive decoded preview from ImagePipeline and repaint."""
         request = result.request
+        if request.purpose.startswith("scroll-base-"):
+            self._on_base_image_ready(result)
+            return
         if not request.purpose.startswith("scroll-"):
             return
 
@@ -753,6 +888,15 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def _on_image_failed(self, result: DecodeResult) -> None:
         """Handle decode failure."""
         request = result.request
+        if request.purpose.startswith("scroll-base-"):
+            idx = request.request_id
+            if (
+                idx in self._base_pending_indices
+                and 0 <= idx < len(self._image_list)
+                and self._image_list[idx] == request.path
+            ):
+                self._base_pending_indices.discard(idx)
+            return
         if not request.purpose.startswith("scroll-"):
             return
 
@@ -802,6 +946,10 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
             if i in self._pixmaps:
                 painter.drawPixmap(screen_rect, self._pixmaps[i])
+            elif i in self._base_pixmaps:
+                # Smoothly enlarging the deliberately tiny base preview gives a
+                # blurred but recognizable page while sharp decoding finishes.
+                painter.drawPixmap(screen_rect, self._base_pixmaps[i])
             elif i in self._failed_indices:
                 painter.fillRect(screen_rect, QColor("#331a1a"))
                 painter.setPen(QColor("#ff5555"))

@@ -135,6 +135,7 @@ class TestScrollReaderRequestLifecycle(unittest.TestCase):
             request
             for request in self.pipeline.requests
             if request["request_id"] == 1
+            and request["purpose"] == "scroll-1"
         )
         self.assertEqual(page_two["priority"], 0)
 
@@ -184,7 +185,10 @@ class TestScrollReaderRequestLifecycle(unittest.TestCase):
         self.widget.set_images(self.image_paths)
         initial_requests = list(self.pipeline.requests)
         visible_request = next(
-            request for request in initial_requests if request["request_id"] == 0
+            request
+            for request in initial_requests
+            if request["request_id"] == 0
+            and request["purpose"] == "scroll-0"
         )
         visible_result = self.result_for(visible_request)
         self.widget.PIXMAP_CACHE_BYTES = self.widget._pixmap_bytes(
@@ -220,6 +224,67 @@ class TestScrollReaderRequestLifecycle(unittest.TestCase):
 
         self.assertEqual(self.widget._pixmaps, {})
         self.assertEqual(self.widget.pixmap_bytes_used, 0)
+
+    def test_all_pages_receive_persistent_low_resolution_fallbacks(self):
+        self.widget.set_images(self.image_paths)
+        base_requests = [
+            request
+            for request in self.pipeline.requests
+            if request["purpose"].startswith("scroll-base-")
+        ]
+
+        self.assertEqual(
+            {request["path"] for request in base_requests},
+            {os.path.abspath(path) for path in self.image_paths},
+        )
+        self.assertTrue(
+            all(
+                request["bounds"].width()
+                <= self.widget.BASE_PREVIEW_MAX_WIDTH
+                for request in base_requests
+            )
+        )
+
+        for request in base_requests:
+            self.widget._on_image_ready(self.result_for(request))
+
+        self.assertEqual(set(self.widget._base_pixmaps), set(range(5)))
+        self.assertLessEqual(
+            self.widget.base_pixmap_bytes_used,
+            self.widget.BASE_PIXMAP_CACHE_BYTES,
+        )
+        before_release = self.widget.base_pixmap_bytes_used
+        self.widget.release_render_cache()
+        self.assertEqual(set(self.widget._base_pixmaps), set(range(5)))
+        self.assertEqual(self.widget.base_pixmap_bytes_used, before_release)
+
+    def test_double_page_prefetch_window_contains_complete_spread_rows(self):
+        self.widget.set_layout_options(double_page=True)
+        self.widget.set_images(self.image_paths)
+
+        _visible, wanted = self.widget._cache_windows()
+        for idx in wanted:
+            row_y = self.widget.image_rects[idx].y()
+            row_indices = {
+                other_idx
+                for other_idx, rect in enumerate(self.widget.image_rects)
+                if rect.y() == row_y
+            }
+            self.assertTrue(row_indices.issubset(wanted))
+
+        detail_requests = {
+            request["request_id"]
+            for request in self.pipeline.requests
+            if request["purpose"] == f"scroll-{request['request_id']}"
+        }
+        self.assertTrue(wanted.issubset(detail_requests))
+
+        detail_order = [
+            request["request_id"]
+            for request in self.pipeline.requests
+            if request["purpose"] == f"scroll-{request['request_id']}"
+        ]
+        self.assertEqual(detail_order[:5], [0, 1, 2, 3, 4])
 
 
 class TestScrollReaderWidget(unittest.TestCase):
