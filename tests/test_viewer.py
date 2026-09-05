@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QImage, QPixmap, QColor, QKeyEvent
-from PyQt6.QtCore import Qt, QSize, QRect, QPointF
+from PyQt6.QtCore import Qt, QSize, QRect, QPointF, QEventLoop, QTimer
 
 from src.viewer import (
     ImageViewerWidget,
@@ -14,11 +14,32 @@ from src.viewer import (
     MainWindow,
     natural_sort_key,
 )
+from src.image_pipeline import (
+    ByteBoundedImageCache,
+    CachedImage,
+    DecodeRequest,
+    DecodeResult,
+)
 
 # Ensure single QApplication instance across tests
 app = QApplication.instance()
 if app is None:
     app = QApplication(["--platform", "offscreen"])
+
+
+def wait_for_signal(signal, condition, timeout_ms=3000):
+    """Process Qt events until a worker result satisfies the expected state."""
+    if condition():
+        return True
+    loop = QEventLoop()
+    timer = QTimer()
+    timer.setSingleShot(True)
+    signal.connect(loop.quit)
+    timer.timeout.connect(loop.quit)
+    timer.start(timeout_ms)
+    loop.exec()
+    signal.disconnect(loop.quit)
+    return condition()
 
 
 class TestNaturalSort(unittest.TestCase):
@@ -87,24 +108,18 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertEqual(rect.x(), 250)
         self.assertEqual(rect.y(), 0)
 
-    def test_load_valid_and_invalid_image(self):
-        """Verify image loading from disk handles valid and invalid files."""
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            temp_path = f.name
+    def test_preview_keeps_source_dimensions_separate(self):
+        """A small preview preserves geometry from the original image."""
+        preview = QImage(80, 60, QImage.Format.Format_RGB32)
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(preview),
+            QSize(4000, 3000),
+            "/tmp/example.png",
+        )
 
-        try:
-            img = QImage(50, 50, QImage.Format.Format_RGB32)
-            img.fill(QColor("red"))
-            img.save(temp_path, "PNG")
-
-            self.assertTrue(self.viewer.load_image(temp_path))
-            self.assertIsNotNone(self.viewer.pixmap())
-            self.assertEqual(self.viewer.pixmap().width(), 50)
-
-            self.assertFalse(self.viewer.load_image("/non/existent/path/img.png"))
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        self.assertEqual(self.viewer.pixmap().size(), QSize(80, 60))
+        self.assertEqual(self.viewer.source_size, QSize(4000, 3000))
+        self.assertEqual(self.viewer.target_rect(), QRect(0, 0, 800, 600))
 
     def test_clear(self):
         """Verify clear() resets pixmap and path."""
@@ -197,6 +212,37 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertEqual(self.viewer.zoom_factor, 1.0)
         self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
 
+    def test_zoom_requests_full_resolution_after_interaction(self):
+        """Zooming beyond available preview pixels requests the original once settled."""
+        preview = QImage(800, 400, QImage.Format.Format_RGB32)
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(preview),
+            QSize(4000, 2000),
+            "/tmp/example.png",
+        )
+        requests = []
+        self.viewer.full_resolution_requested.connect(lambda: requests.append(True))
+
+        self.viewer.zoom_in()
+        self.viewer._finish_interaction()
+
+        self.assertEqual(requests, [True])
+
+
+class TestByteBoundedImageCache(unittest.TestCase):
+    """Verify decoded-memory accounting and least-recently-used eviction."""
+
+    def test_cache_evicts_by_decoded_bytes(self):
+        image_a = QImage(4, 4, QImage.Format.Format_ARGB32)
+        image_b = QImage(4, 4, QImage.Format.Format_ARGB32)
+        cache = ByteBoundedImageCache(int(image_a.sizeInBytes()))
+        cache.put(("a",), CachedImage(image_a, image_a.size()))
+        cache.put(("b",), CachedImage(image_b, image_b.size()))
+
+        self.assertIsNone(cache.get(("a",)))
+        self.assertIsNotNone(cache.get(("b",)))
+        self.assertLessEqual(cache.bytes_used, cache.byte_limit)
+
 
 class TestMainWindow(unittest.TestCase):
     """Test suite for MainWindow."""
@@ -215,6 +261,16 @@ class TestMainWindow(unittest.TestCase):
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
+    def assert_loaded(self, window, expected_index):
+        self.assertTrue(
+            wait_for_signal(
+                window.image_loaded,
+                lambda: window.current_index == expected_index
+                and window.image_viewer.pixmap() is not None,
+            ),
+            "Timed out waiting for asynchronous image decoding",
+        )
+
     def test_main_window_init(self):
         """Verify MainWindow initializes with correct dimensions and central widget."""
         window = MainWindow()
@@ -227,6 +283,7 @@ class TestMainWindow(unittest.TestCase):
     def test_folder_discovery_and_alphabetical_order(self):
         """Verify images in folder are discovered and sorted alphabetically (page1, page2, page10)."""
         window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
         self.assertEqual(len(window.image_list), 3)
         self.assertTrue(window.image_list[0].endswith("page1.png"))
         self.assertTrue(window.image_list[1].endswith("page2.png"))
@@ -239,6 +296,7 @@ class TestMainWindow(unittest.TestCase):
     def test_navigation_and_counter_updating(self):
         """Verify next_image and prev_image update the title counter and clamp at bounds."""
         window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
 
         # Initially at page1 (1/3)
         self.assertEqual(window.current_index, 0)
@@ -246,11 +304,13 @@ class TestMainWindow(unittest.TestCase):
 
         # Next -> page2 (2/3)
         window.next_image()
+        self.assert_loaded(window, 1)
         self.assertEqual(window.current_index, 1)
         self.assertIn("[2/3]", window.windowTitle())
 
         # Next -> page10 (3/3)
         window.next_image()
+        self.assert_loaded(window, 2)
         self.assertEqual(window.current_index, 2)
         self.assertIn("[3/3]", window.windowTitle())
 
@@ -261,13 +321,16 @@ class TestMainWindow(unittest.TestCase):
 
         # Prev -> page2 (2/3)
         window.prev_image()
+        self.assert_loaded(window, 1)
         self.assertEqual(window.current_index, 1)
         self.assertIn("[2/3]", window.windowTitle())
 
         # First and Last methods
         window.last_image()
+        self.assert_loaded(window, 2)
         self.assertEqual(window.current_index, 2)
         window.first_image()
+        self.assert_loaded(window, 0)
         self.assertEqual(window.current_index, 0)
         window.deleteLater()
 
@@ -275,6 +338,7 @@ class TestMainWindow(unittest.TestCase):
         """Opening a specific file in a folder sets current_index to that file."""
         target_file = os.path.join(self.temp_dir, "page2.png")
         window = MainWindow(image_path=target_file)
+        self.assert_loaded(window, 1)
         self.assertEqual(window.current_index, 1)
         self.assertIn("[2/3]", window.windowTitle())
         self.assertIn("page2.png", window.windowTitle())
@@ -294,11 +358,13 @@ class TestMainWindow(unittest.TestCase):
     def test_keyboard_events_in_main_window(self):
         """Verify MainWindow keyPressEvent triggers navigation and zoom."""
         window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
         self.assertEqual(window.current_index, 0)
 
         # Key Right -> Next
         event_right = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
         window.keyPressEvent(event_right)
+        self.assert_loaded(window, 1)
         self.assertEqual(window.current_index, 1)
 
         # Ctrl+Plus -> Zoom In
@@ -306,6 +372,57 @@ class TestMainWindow(unittest.TestCase):
         event_zoom = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
         window.keyPressEvent(event_zoom)
         self.assertGreater(window.image_viewer.zoom_factor, initial_zoom)
+        window.deleteLater()
+
+    def test_failed_navigation_keeps_displayed_index_and_title(self):
+        """A corrupt target never commits its index over the valid displayed image."""
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        corrupt_path = window.image_list[1]
+        with open(corrupt_path, "wb") as corrupt_file:
+            corrupt_file.write(b"not an image")
+
+        window.go_to_index(1)
+        self.assertTrue(
+            wait_for_signal(
+                window.image_load_failed,
+                lambda: window._requested_index is None,
+            )
+        )
+
+        self.assertEqual(window.current_index, 0)
+        self.assertIn("page1.png", window.windowTitle())
+        window.deleteLater()
+
+    def test_stale_decode_result_cannot_replace_newer_request(self):
+        """A late worker result is ignored after the request generation advances."""
+        window = MainWindow()
+        current_path = os.path.abspath(self.image_files[0])
+        requested_path = os.path.abspath(self.image_files[1])
+        window.image_list = [current_path, requested_path]
+        window.current_index = 0
+        window._requested_index = 1
+        window._request_generation = 2
+
+        current_preview = QImage(20, 20, QImage.Format.Format_RGB32)
+        window.image_viewer.set_preview_pixmap(
+            QPixmap.fromImage(current_preview), QSize(100, 100), current_path
+        )
+        stale_request = DecodeRequest(
+            request_id=1,
+            path=requested_path,
+            purpose="current-preview",
+            bounds=QSize(800, 600),
+            cache_key=(requested_path, "stale"),
+        )
+        stale_image = QImage(30, 30, QImage.Format.Format_RGB32)
+        window._on_image_ready(
+            DecodeResult(stale_request, stale_image, QSize(100, 100))
+        )
+
+        self.assertEqual(window.current_index, 0)
+        self.assertEqual(window._requested_index, 1)
+        self.assertEqual(window.image_viewer.image_path, current_path)
         window.deleteLater()
 
 
