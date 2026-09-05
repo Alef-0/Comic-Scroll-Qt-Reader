@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import QApplication, QLabel
 from src.about_dialog import AboutDialog
 from src.main import parse_arguments
 from src.hud_overlay import ViewerHud
-from src.viewer import MainWindow, ViewerMode
+from src.shortcuts_dialog import ShortcutsDialog
+from src.viewer import ComicMode, MainWindow, ViewerMode
 from src.welcome_widget import WelcomeWidget
 
 app = QApplication.instance()
@@ -127,35 +128,36 @@ class TestViewerHud(unittest.TestCase):
         self.hud.deleteLater()
 
     def test_page_info_updates_labels_and_buttons(self):
-        # Middle page: all navigation buttons enabled
+        # Middle page: previous and next navigation buttons enabled
         self.hud.set_page_info(current_index=5, total_pages=10)
         self.assertEqual(self.hud.btn_page.text(), "Page 6 / 10")
-        self.assertTrue(self.hud.btn_first.isEnabled())
         self.assertTrue(self.hud.btn_prev.isEnabled())
         self.assertTrue(self.hud.btn_next.isEnabled())
-        self.assertTrue(self.hud.btn_last.isEnabled())
 
-        # First page: First & Prev disabled
+        # First page: Previous disabled
         self.hud.set_page_info(current_index=0, total_pages=10)
         self.assertEqual(self.hud.btn_page.text(), "Page 1 / 10")
-        self.assertFalse(self.hud.btn_first.isEnabled())
         self.assertFalse(self.hud.btn_prev.isEnabled())
         self.assertTrue(self.hud.btn_next.isEnabled())
-        self.assertTrue(self.hud.btn_last.isEnabled())
 
-        # Last page: Next & Last disabled
+        # Last page: Next disabled
         self.hud.set_page_info(current_index=9, total_pages=10)
         self.assertEqual(self.hud.btn_page.text(), "Page 10 / 10")
-        self.assertTrue(self.hud.btn_first.isEnabled())
         self.assertTrue(self.hud.btn_prev.isEnabled())
         self.assertFalse(self.hud.btn_next.isEnabled())
-        self.assertFalse(self.hud.btn_last.isEnabled())
 
         # Empty pages
         self.hud.set_page_info(current_index=-1, total_pages=0)
         self.assertEqual(self.hud.btn_page.text(), "Page 0 / 0")
         self.assertFalse(self.hud.btn_prev.isEnabled())
         self.assertFalse(self.hud.btn_next.isEnabled())
+
+    def test_page_info_reserves_space_for_multi_digit_counts(self):
+        self.hud.set_page_info(current_index=8, total_pages=125)
+        expected_width = self.hud.btn_page.fontMetrics().horizontalAdvance(
+            "Page 125 / 125"
+        )
+        self.assertGreaterEqual(self.hud.btn_page.minimumWidth(), expected_width)
 
     def test_mode_and_zoom_display(self):
         self.hud.set_mode(is_scroll=True)
@@ -183,10 +185,8 @@ class TestViewerHud(unittest.TestCase):
 
     def test_hud_button_signals(self):
         signals = []
-        self.hud.first_clicked.connect(lambda: signals.append("first"))
         self.hud.prev_clicked.connect(lambda: signals.append("prev"))
         self.hud.next_clicked.connect(lambda: signals.append("next"))
-        self.hud.last_clicked.connect(lambda: signals.append("last"))
         self.hud.jump_clicked.connect(lambda: signals.append("jump"))
         self.hud.mode_toggled.connect(lambda: signals.append("mode"))
         self.hud.zoom_in_clicked.connect(lambda: signals.append("zoom_in"))
@@ -194,10 +194,8 @@ class TestViewerHud(unittest.TestCase):
         self.hud.zoom_reset_clicked.connect(lambda: signals.append("zoom_reset"))
         self.hud.fullscreen_toggled.connect(lambda: signals.append("fullscreen"))
 
-        self.hud.btn_first.click()
         self.hud.btn_prev.click()
         self.hud.btn_next.click()
-        self.hud.btn_last.click()
         self.hud.btn_page.click()
         self.hud.btn_mode.click()
         self.hud.btn_zoom_in.click()
@@ -208,10 +206,8 @@ class TestViewerHud(unittest.TestCase):
         self.assertEqual(
             signals,
             [
-                "first",
                 "prev",
                 "next",
-                "last",
                 "jump",
                 "mode",
                 "zoom_in",
@@ -220,6 +216,50 @@ class TestViewerHud(unittest.TestCase):
                 "fullscreen",
             ],
         )
+
+    def test_hud_only_reveals_inside_its_vertical_activation_band(self):
+        self.hud.reposition(parent_width=1280, parent_height=720)
+        self.hud.hide()
+
+        self.hud.on_pointer_move(0)
+        self.assertTrue(self.hud.isHidden())
+
+        self.hud.on_pointer_move(self.hud.y())
+        self.assertFalse(self.hud.isHidden())
+
+        self.hud.on_pointer_move(0)
+        self.assertFalse(self.hud._is_pointer_in_activation_band)
+        self.assertTrue(self.hud._hide_timer.isActive())
+
+    def test_hud_uses_fades_in_both_directions(self):
+        self.hud.hide_immediately()
+        self.hud.toggle_visibility()
+        self.assertEqual(self.hud._fade_animation.endValue(), 1.0)
+
+        self.hud.toggle_visibility()
+        self.assertEqual(self.hud._fade_animation.endValue(), 0.0)
+
+    def test_comic_mode_selector_emits_selected_preset(self):
+        selected = []
+        self.hud.comic_mode_selected.connect(selected.append)
+
+        self.hud.btn_comic_mode.menu().actions()[1].trigger()
+
+        self.assertEqual(selected, ["manga"])
+
+
+class TestShortcutsDialog(unittest.TestCase):
+    def test_shortcuts_use_the_application_card_style_and_current_gestures(self):
+        dialog = ShortcutsDialog()
+        label_text = " ".join(
+            label.text() for label in dialog.findChildren(QLabel)
+        )
+
+        self.assertEqual(dialog.objectName(), "shortcutsDialog")
+        self.assertIn("QFrame#shortcutCard", dialog.styleSheet())
+        self.assertIn("Ctrl + Wheel", label_text)
+        self.assertIn("Shift + Wheel", label_text)
+        dialog.deleteLater()
 
 
 class TestMainWindowInterface(unittest.TestCase):
@@ -347,14 +387,49 @@ class TestMainWindowInterface(unittest.TestCase):
         window.deleteLater()
 
     def test_menubar_structure_and_actions(self):
-        """Verify native menu bar has File, View, Navigate, Help menus with shortcuts."""
+        """Verify menu order and the added comic layouts."""
         window = MainWindow()
         menubar = window.menuBar()
         actions = [action.text() for action in menubar.actions()]
         self.assertIn("&File", actions)
         self.assertIn("&View", actions)
+        self.assertIn("&Comic Modes", actions)
         self.assertIn("&Navigate", actions)
         self.assertIn("&Help", actions)
+
+        view_actions = [
+            action.text()
+            for action in menubar.actions()[1].menu().actions()
+            if not action.isSeparator()
+        ]
+        self.assertLess(
+            view_actions.index("Single &Page Mode"),
+            view_actions.index("Continuous &Scroll Mode"),
+        )
+        self.assertTrue(window._double_spread_action.isChecked())
+        window.deleteLater()
+
+    def test_comic_mode_presets_coordinate_layout_and_hud(self):
+        window = MainWindow(target_path=self.temp_dir)
+
+        window.set_comic_mode(ComicMode.COMICS)
+        self.assertTrue(window.scroll_reader.double_page)
+        self.assertFalse(window.scroll_reader.invert_page_order)
+        self.assertTrue(window.scroll_reader.page_spacing)
+        self.assertIn("Comics", window._hud.btn_comic_mode.text())
+
+        window.set_comic_mode(ComicMode.MANGA)
+        self.assertTrue(window.scroll_reader.double_page)
+        self.assertTrue(window.scroll_reader.invert_page_order)
+        self.assertIn("Manga", window._hud.btn_comic_mode.text())
+
+        window.scroll_reader.zoom_in()
+        window.set_comic_mode(ComicMode.WEBTOON)
+        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
+        self.assertFalse(window.scroll_reader.double_page)
+        self.assertFalse(window.scroll_reader.page_spacing)
+        self.assertEqual(window.scroll_reader.zoom_factor, 1.0)
+        self.assertIn("Webtoon", window._hud.btn_comic_mode.text())
         window.deleteLater()
 
     def test_toggle_fullscreen(self):
@@ -373,15 +448,35 @@ class TestMainWindowInterface(unittest.TestCase):
         self.assertEqual(window._hud.btn_fullscreen.text(), "⛶")
         window.deleteLater()
 
-    def test_hud_pin_toggle(self):
-        """Toggling HUD pin keeps HUD visible."""
+    def test_hud_visibility_toggle(self):
+        """Pressing H alternates the HUD's intended visibility."""
         window = MainWindow(target_path=self.temp_dir)
-        self.assertFalse(window._hud._is_pinned)
-        window._hud.toggle_pin()
-        self.assertTrue(window._hud._is_pinned)
+        window._hud.hide_immediately()
+        key_h = QKeyEvent(
+            QKeyEvent.Type.KeyPress,
+            Qt.Key.Key_H,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.assertFalse(window._hud._fade_target_visible)
+        window.keyPressEvent(key_h)
+        self.assertTrue(window._hud._fade_target_visible)
         self.assertFalse(window._hud.isHidden())
-        window._hud.toggle_pin()
-        self.assertFalse(window._hud._is_pinned)
+        window.keyPressEvent(key_h)
+        self.assertFalse(window._hud._fade_target_visible)
+        window.deleteLater()
+
+    def test_close_current_restores_normal_default_window_from_fullscreen(self):
+        window = MainWindow(target_path=self.temp_dir)
+        window.showFullScreen()
+
+        window.close_current()
+
+        self.assertFalse(window.isFullScreen())
+        self.assertFalse(window.isMaximized())
+        self.assertEqual(
+            window.size(), QSize(MainWindow.DEFAULT_WIDTH, MainWindow.DEFAULT_HEIGHT)
+        )
+        self.assertTrue(window.menuBar().isVisible())
         window.deleteLater()
 
     def test_welcome_screen_fixed_size_and_resize_on_load(self):

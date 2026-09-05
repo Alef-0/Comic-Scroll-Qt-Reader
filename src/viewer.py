@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QDragEnterEvent,
     QDragLeaveEvent,
@@ -50,6 +51,7 @@ try:
     )
     from src.scroll_reader import ScrollReaderWidget
     from src.single_viewer import ImageViewerWidget, ScaledImageLabel
+    from src.shortcuts_dialog import ShortcutsDialog
     from src.welcome_widget import WelcomeWidget
 except ImportError:
     from controls.events import (
@@ -69,6 +71,7 @@ except ImportError:
     )
     from scroll_reader import ScrollReaderWidget
     from single_viewer import ImageViewerWidget, ScaledImageLabel
+    from shortcuts_dialog import ShortcutsDialog
     from welcome_widget import WelcomeWidget
 
 
@@ -76,6 +79,13 @@ except ImportError:
 class ViewerMode(Enum):
     SINGLE = "single"
     SCROLL = "scroll"
+
+
+class ComicMode(Enum):
+    COMICS = "comics"
+    MANGA = "manga"
+    WEBTOON = "webtoon"
+    CUSTOM = "custom"
 
 SUPPORTED_EXTENSIONS = {
     ".png",
@@ -109,6 +119,7 @@ __all__ = [
     "ScrollReaderWidget",
     "MainWindow",
     "ViewerMode",
+    "ComicMode",
     "SUPPORTED_EXTENSIONS",
     "natural_sort_key",
     "WelcomeWidget",
@@ -178,6 +189,9 @@ class MainWindow(QMainWindow):
             self._request_full_resolution
         )
         self.image_viewer.toggle_mode_requested.connect(self.toggle_mode)
+        self.image_viewer.page_scroll_requested.connect(
+            self._scroll_single_page
+        )
 
         # Connect scroll reader signals
         self.scroll_reader.visible_image_changed.connect(self._on_scroll_visible_changed)
@@ -188,17 +202,17 @@ class MainWindow(QMainWindow):
 
         # Floating bottom HUD overlay
         self._hud = ViewerHud(self)
-        self._hud.first_clicked.connect(self.first_image)
         self._hud.prev_clicked.connect(self.prev_image)
         self._hud.next_clicked.connect(self.next_image)
-        self._hud.last_clicked.connect(self.last_image)
         self._hud.jump_clicked.connect(self.goto_page_dialog)
         self._hud.mode_toggled.connect(self.toggle_mode)
         self._hud.zoom_in_clicked.connect(self._zoom_in)
         self._hud.zoom_out_clicked.connect(self._zoom_out)
         self._hud.zoom_reset_clicked.connect(self._reset_zoom)
         self._hud.fullscreen_toggled.connect(self.toggle_fullscreen)
-        self._hud.hide()
+        self._hud.comic_mode_selected.connect(self.set_comic_mode)
+        self._hud.set_comic_mode(ComicMode.CUSTOM.value)
+        self._hud.hide_immediately()
 
         # Keyboard event handler
         self._keyboard_handler = KeyboardEventHandler(
@@ -220,7 +234,7 @@ class MainWindow(QMainWindow):
             on_close_document=self.close_current,
             on_goto_page=self.goto_page_dialog,
             on_help=self.show_shortcuts_dialog,
-            on_toggle_hud=self._hud.toggle_pin,
+            on_toggle_hud=self._hud.toggle_visibility,
         )
 
         # Enable drag-and-drop
@@ -243,6 +257,7 @@ class MainWindow(QMainWindow):
         self.setMouseTracking(True)
 
         # Native Menu Bar
+        self.comic_mode = ComicMode.CUSTOM
         self._init_menu_bar()
 
         # Image folder discovery / PDF state
@@ -255,6 +270,9 @@ class MainWindow(QMainWindow):
         self._full_request_pending = False
         self._refine_request_key: Optional[tuple[str, int, int]] = None
         self._error_dialog: Optional[QMessageBox] = None
+        self._single_scroll_transition: Optional[
+            tuple[int, float, float, bool]
+        ] = None
 
         initial_path = target_path or image_path
         if initial_path:
@@ -269,6 +287,7 @@ class MainWindow(QMainWindow):
         if self.viewer_mode == mode:
             return
 
+        self._single_scroll_transition = None
         self.viewer_mode = mode
         if mode == ViewerMode.SINGLE:
             # Sync active index from scroll reader to single image viewer
@@ -307,6 +326,53 @@ class MainWindow(QMainWindow):
             self.set_mode(ViewerMode.SINGLE)
         else:
             self.set_mode(ViewerMode.SCROLL)
+
+    def set_comic_mode(self, mode) -> None:
+        """Apply one of the coordinated comic layout presets."""
+        selected = mode if isinstance(mode, ComicMode) else ComicMode(mode)
+        if selected == ComicMode.CUSTOM:
+            return
+
+        presets = {
+            ComicMode.COMICS: (True, False, True, True),
+            ComicMode.MANGA: (True, True, True, True),
+            ComicMode.WEBTOON: (False, False, False, True),
+        }
+        double_page, invert_order, page_spacing, detect_spreads = presets[selected]
+        self.comic_mode = selected
+
+        self._double_page_action.setChecked(double_page)
+        self._invert_pages_action.setChecked(invert_order)
+        self._page_spacing_action.setChecked(page_spacing)
+        self._double_spread_action.setChecked(detect_spreads)
+        self._comic_actions[selected].setChecked(True)
+        self.scroll_reader.set_layout_options(
+            double_page=double_page,
+            invert_page_order=invert_order,
+            page_spacing=page_spacing,
+            detect_double_spreads=detect_spreads,
+        )
+        if selected == ComicMode.WEBTOON:
+            self.scroll_reader.reset_zoom()
+        self._hud.set_comic_mode(selected.value)
+        self._hud.reposition(self.width(), self.height())
+        self.set_mode(ViewerMode.SCROLL)
+
+    def _apply_custom_layout_options(self) -> None:
+        """Apply individually selected View options and mark the preset custom."""
+        self.scroll_reader.set_layout_options(
+            double_page=self._double_page_action.isChecked(),
+            invert_page_order=self._invert_pages_action.isChecked(),
+            page_spacing=self._page_spacing_action.isChecked(),
+            detect_double_spreads=self._double_spread_action.isChecked(),
+        )
+        self.comic_mode = ComicMode.CUSTOM
+        self._comic_mode_group.setExclusive(False)
+        for action in self._comic_actions.values():
+            action.setChecked(False)
+        self._comic_mode_group.setExclusive(True)
+        self._hud.set_comic_mode(ComicMode.CUSTOM.value)
+        self._hud.reposition(self.width(), self.height())
 
     def _on_scroll_visible_changed(self, index: int) -> None:
         """Update current index and title when scrolling in Scroll Reader mode."""
@@ -368,6 +434,7 @@ class MainWindow(QMainWindow):
 
         self.current_index = -1
         self._requested_index = None
+        self._single_scroll_transition = None
 
         if self.image_list and requested_index >= 0:
             self.setMinimumSize(320, 180)
@@ -384,14 +451,14 @@ class MainWindow(QMainWindow):
             self._hud.set_page_info(requested_index, len(self.image_list))
             self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
             self._hud.reposition(self.width(), self.height())
-            self._hud.on_user_interaction()
+            self._hud.hide_immediately()
             return res
         else:
             self.image_viewer.clear()
             self.scroll_reader.clear()
             self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
             self._stack.setCurrentWidget(self.welcome_widget)
-            self._hud.hide()
+            self._hud.hide_immediately()
             self.update_title()
             return False
 
@@ -415,7 +482,7 @@ class MainWindow(QMainWindow):
             self.scroll_reader.clear()
             self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
             self._stack.setCurrentWidget(self.welcome_widget)
-            self._hud.hide()
+            self._hud.hide_immediately()
             self.update_title()
             return False
 
@@ -437,13 +504,14 @@ class MainWindow(QMainWindow):
         requested_index = max(0, min(start_page, len(self.image_list) - 1))
         self.current_index = -1
         self._requested_index = None
+        self._single_scroll_transition = None
 
         self.scroll_reader.set_images(self.image_list, start_index=requested_index)
         res = self._request_index(requested_index, force=True)
         self._hud.set_page_info(requested_index, len(self.image_list))
         self._hud.set_mode(True)
         self._hud.reposition(self.width(), self.height())
-        self._hud.on_user_interaction()
+        self._hud.hide_immediately()
         return res
 
     def load_image(self, image_path: str) -> bool:
@@ -486,7 +554,7 @@ class MainWindow(QMainWindow):
         if not self.image_list:
             self.setWindowTitle("Qt Scroll Reader - [0/0] No images found")
             if hasattr(self, "_hud"):
-                self._hud.hide()
+                self._hud.hide_immediately()
             return
 
         mode_tag = " [Scroll]" if self.viewer_mode == ViewerMode.SCROLL else ""
@@ -505,7 +573,7 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_index < len(self.image_list)):
             self.setWindowTitle("Qt Scroll Reader - [0/0] No image displayed")
             if hasattr(self, "_hud"):
-                self._hud.hide()
+                self._hud.hide_immediately()
             return
 
         path = self.image_list[self.current_index]
@@ -550,6 +618,21 @@ class MainWindow(QMainWindow):
         base_index = self._effective_index()
         if self.image_list and base_index > 0:
             self.go_to_index(base_index - 1)
+
+    def _scroll_single_page(
+        self, direction: int, zoom_factor: float, horizontal_ratio: float
+    ) -> None:
+        """Cross a page boundary while retaining the single-view scroll state."""
+        target_index = self._effective_index() + direction
+        if not (0 <= target_index < len(self.image_list)):
+            return
+        self._single_scroll_transition = (
+            target_index,
+            zoom_factor,
+            horizontal_ratio,
+            direction > 0,
+        )
+        self.go_to_index(target_index)
 
     def first_image(self):
         """Navigate to the first image."""
@@ -620,9 +703,29 @@ class MainWindow(QMainWindow):
             if self.viewer_mode == ViewerMode.SCROLL:
                 self.scroll_reader.scroll_to_index(accepted_index)
             pixmap = QPixmap.fromImage(result.image)
+            preserve_scroll = False
+            if self._single_scroll_transition is not None:
+                transition_index = self._single_scroll_transition[0]
+                preserve_scroll = (
+                    self.viewer_mode == ViewerMode.SINGLE
+                    and transition_index == accepted_index
+                )
+                if not preserve_scroll:
+                    self._single_scroll_transition = None
             self.image_viewer.set_preview_pixmap(
-                pixmap, result.source_size, request.path, reset_view=True
+                pixmap,
+                result.source_size,
+                request.path,
+                reset_view=not preserve_scroll,
             )
+            if preserve_scroll:
+                _, zoom_factor, horizontal_ratio, at_top = (
+                    self._single_scroll_transition
+                )
+                self._single_scroll_transition = None
+                self.image_viewer.restore_scroll_position(
+                    zoom_factor, horizontal_ratio, at_top
+                )
             self.update_title()
             self.image_loaded.emit(request.path)
             self._prefetch_neighbours()
@@ -658,6 +761,7 @@ class MainWindow(QMainWindow):
 
         failed_path = request.path
         self._requested_index = None
+        self._single_scroll_transition = None
         if self.current_index < 0:
             self.image_viewer.clear()
         self.update_title()
@@ -781,15 +885,46 @@ class MainWindow(QMainWindow):
         # View Menu
         view_menu = menubar.addMenu("&View")
 
+        mode_single_action = QAction("Single &Page Mode", self)
+        mode_single_action.setShortcut("1")
+        mode_single_action.triggered.connect(lambda: self.set_mode(ViewerMode.SINGLE))
+        view_menu.addAction(mode_single_action)
+
         mode_scroll_action = QAction("Continuous &Scroll Mode", self)
         mode_scroll_action.setShortcut("2")
         mode_scroll_action.triggered.connect(lambda: self.set_mode(ViewerMode.SCROLL))
         view_menu.addAction(mode_scroll_action)
 
-        mode_single_action = QAction("Single &Page Mode", self)
-        mode_single_action.setShortcut("1")
-        mode_single_action.triggered.connect(lambda: self.set_mode(ViewerMode.SINGLE))
-        view_menu.addAction(mode_single_action)
+        view_menu.addSeparator()
+
+        self._double_page_action = QAction("Double Page", self)
+        self._double_page_action.setCheckable(True)
+        self._double_page_action.triggered.connect(self._apply_custom_layout_options)
+        view_menu.addAction(self._double_page_action)
+
+        self._invert_pages_action = QAction("Invert Pages Order", self)
+        self._invert_pages_action.setCheckable(True)
+        self._invert_pages_action.triggered.connect(self._apply_custom_layout_options)
+        view_menu.addAction(self._invert_pages_action)
+
+        self._page_spacing_action = QAction("Activate Page Spacing", self)
+        self._page_spacing_action.setCheckable(True)
+        self._page_spacing_action.setChecked(True)
+        self._page_spacing_action.triggered.connect(self._apply_custom_layout_options)
+        view_menu.addAction(self._page_spacing_action)
+
+        self._double_spread_action = QAction(
+            "⚠ Default Double Spread Detection", self
+        )
+        self._double_spread_action.setCheckable(True)
+        self._double_spread_action.setChecked(True)
+        self._double_spread_action.setToolTip(
+            "Show pages wider than 1.5× the folder average as a full row"
+        )
+        self._double_spread_action.triggered.connect(
+            self._apply_custom_layout_options
+        )
+        view_menu.addAction(self._double_spread_action)
 
         view_menu.addSeparator()
 
@@ -817,8 +952,29 @@ class MainWindow(QMainWindow):
 
         hud_action = QAction("Toggle &HUD", self)
         hud_action.setShortcut("H")
-        hud_action.triggered.connect(self._hud.toggle_pin)
+        hud_action.triggered.connect(self._hud.toggle_visibility)
         view_menu.addAction(hud_action)
+
+        # Comic Modes Menu
+        comic_menu = menubar.addMenu("&Comic Modes")
+        self._comic_mode_group = QActionGroup(self)
+        self._comic_mode_group.setExclusive(True)
+        self._comic_actions = {}
+        for label, mode in (
+            ("Comics - Double Page, Left to Right", ComicMode.COMICS),
+            ("Manga - Double Page, Right to Left", ComicMode.MANGA),
+            ("Webtoon - Continuous, No Spacing", ComicMode.WEBTOON),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, selected=mode: (
+                    self.set_comic_mode(selected) if checked else None
+                )
+            )
+            self._comic_mode_group.addAction(action)
+            self._comic_actions[mode] = action
+            comic_menu.addAction(action)
 
         # Navigate Menu
         nav_menu = menubar.addMenu("&Navigate")
@@ -955,7 +1111,8 @@ class MainWindow(QMainWindow):
                 return True
         elif etype == QEvent.Type.MouseMove:
             if self.image_list:
-                self._hud.on_user_interaction()
+                local_pos = watched.mapTo(self, event.position().toPoint())
+                self._hud.on_pointer_move(local_pos.y())
         return super().eventFilter(watched, event)
 
     def open_file_dialog(self):
@@ -1011,37 +1168,8 @@ class MainWindow(QMainWindow):
                 self.go_to_index(target_idx)
 
     def show_shortcuts_dialog(self):
-        """Display keyboard and mouse shortcuts reference."""
-        html = """
-        <h3>Keyboard & Mouse Shortcuts</h3>
-        <table border="0" cellpadding="4" cellspacing="2" style="color: #eee;">
-          <tr><td><b>1 / 2</b></td><td>Switch to Single / Continuous Scroll mode</td></tr>
-          <tr><td><b>F11 or F</b></td><td>Toggle Fullscreen</td></tr>
-          <tr><td><b>Esc</b></td><td>Exit Fullscreen</td></tr>
-          <tr><td><b>Ctrl+O</b></td><td>Open Image or PDF File</td></tr>
-          <tr><td><b>Ctrl+Shift+O</b></td><td>Open Comic Folder</td></tr>
-          <tr><td><b>Ctrl+W</b></td><td>Close Current Document</td></tr>
-          <tr><td><b>Ctrl+G</b></td><td>Go to Page...</td></tr>
-          <tr><td><b>H</b></td><td>Toggle Bottom HUD Overlay</td></tr>
-          <tr><td><b>Right / Down / Space / PageDown</b></td><td>Next Page</td></tr>
-          <tr><td><b>Left / Up / PageUp / Backspace</b></td><td>Previous Page</td></tr>
-          <tr><td><b>Home / End</b></td><td>First / Last Page</td></tr>
-          <tr><td><b>Ctrl + Plus / Minus</b></td><td>Zoom In / Out</td></tr>
-          <tr><td><b>Ctrl + 0</b></td><td>Reset Zoom to Fit</td></tr>
-          <tr><td><b>Ctrl + Mouse Wheel</b></td><td>Anchored Zoom In / Out</td></tr>
-          <tr><td><b>Esc</b></td><td>Close Application (Interrupt)</td></tr>
-          <tr><td><b>Ctrl+C</b></td><td>Terminal Interrupt (Close Application)</td></tr>
-          <tr><td><b>Left Click + Drag</b></td><td>Pan Image / Viewport</td></tr>
-          <tr><td><b>Double Click</b></td><td>Reset Zoom / View</td></tr>
-          <tr><td><b>Right Click</b></td><td>Toggle View Mode</td></tr>
-          <tr><td><b>Middle Click</b></td><td>Next Page</td></tr>
-        </table>
-        """
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("Shortcuts - Qt Scroll Reader")
-        dialog.setTextFormat(Qt.TextFormat.RichText)
-        dialog.setText(html)
-        dialog.setIcon(QMessageBox.Icon.Information)
+        """Display the styled keyboard and mouse shortcuts reference."""
+        dialog = ShortcutsDialog(self)
         dialog.exec()
 
     def show_about_dialog(self):
@@ -1060,9 +1188,14 @@ class MainWindow(QMainWindow):
         self._requested_index = None
         self.image_viewer.clear()
         self.scroll_reader.clear()
+        if self.isFullScreen() or self.isMaximized() or self.isMinimized():
+            self.showNormal()
+        self.menuBar().setVisible(True)
+        self._hud.set_fullscreen(False)
         self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self._stack.setCurrentWidget(self.welcome_widget)
-        self._hud.hide()
+        self._hud.hide_immediately()
         self.update_title()
 
     def toggle_fullscreen(self):
@@ -1076,8 +1209,6 @@ class MainWindow(QMainWindow):
             self.menuBar().setVisible(False)
             self._hud.set_fullscreen(True)
         self._hud.reposition(self.width(), self.height())
-        if self.image_list:
-            self._hud.on_user_interaction()
 
     def _exit_fullscreen_if_active(self):
         if self.isFullScreen():
@@ -1086,6 +1217,12 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
         self._hud.reposition(self.width(), self.height())
+
+    def leaveEvent(self, event):
+        """Begin hiding the HUD when the pointer leaves the reader window."""
+        if self.image_list:
+            self._hud.on_pointer_move(-1)
+        super().leaveEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard navigation and shortcuts."""

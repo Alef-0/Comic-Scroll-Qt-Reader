@@ -1,12 +1,19 @@
 """Floating HUD overlay for Qt Scroll Reader."""
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
-    QLabel,
+    QMenu,
     QPushButton,
-    QVBoxLayout,
+    QToolButton,
     QWidget,
 )
 
@@ -18,24 +25,36 @@ class ViewerHud(QWidget):
     and fullscreen toggle, with auto-hiding after inactivity.
     """
 
-    first_clicked = pyqtSignal()
     prev_clicked = pyqtSignal()
     next_clicked = pyqtSignal()
-    last_clicked = pyqtSignal()
     jump_clicked = pyqtSignal()
     mode_toggled = pyqtSignal()
     zoom_in_clicked = pyqtSignal()
     zoom_out_clicked = pyqtSignal()
     zoom_reset_clicked = pyqtSignal()
     fullscreen_toggled = pyqtSignal()
+    comic_mode_selected = pyqtSignal(str)
 
-    HIDE_DELAY_MS = 3000
+    HIDE_DELAY_MS = 900
+    FADE_DURATION_MS = 350
+    ACTIVATION_MARGIN = 28
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._is_pinned = False
         self._is_mouse_inside = False
+        self._is_pointer_in_activation_band = False
+        self._fade_target_visible = False
+
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._fade_animation = QPropertyAnimation(
+            self._opacity_effect, b"opacity", self
+        )
+        self._fade_animation.setDuration(self.FADE_DURATION_MS)
+        self._fade_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._fade_animation.finished.connect(self._finish_fade)
 
         # Inactivity auto-hide timer
         self._hide_timer = QTimer(self)
@@ -59,7 +78,7 @@ class ViewerHud(QWidget):
             "  border: 1px solid rgba(255, 255, 255, 0.15);"
             "  border-radius: 8px;"
             "}"
-            "QPushButton {"
+            "QPushButton, QToolButton {"
             "  background: transparent;"
             "  color: #e0e0e0;"
             "  font-size: 13px;"
@@ -69,14 +88,14 @@ class ViewerHud(QWidget):
             "  padding: 4px 8px;"
             "  min-height: 24px;"
             "}"
-            "QPushButton:hover {"
+            "QPushButton:hover, QToolButton:hover {"
             "  background-color: rgba(255, 255, 255, 0.15);"
             "  color: #ffffff;"
             "}"
-            "QPushButton:pressed {"
+            "QPushButton:pressed, QToolButton:pressed {"
             "  background-color: rgba(255, 255, 255, 0.25);"
             "}"
-            "QPushButton:disabled {"
+            "QPushButton:disabled, QToolButton:disabled {"
             "  color: #555555;"
             "}"
             "QLabel {"
@@ -88,13 +107,6 @@ class ViewerHud(QWidget):
         pill_layout = QHBoxLayout(self.pill)
         pill_layout.setContentsMargins(10, 5, 10, 5)
         pill_layout.setSpacing(6)
-
-        # Navigation: First, Prev
-        self.btn_first = QPushButton("⏮", self.pill)
-        self.btn_first.setToolTip("First page (Home)")
-        self.btn_first.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_first.clicked.connect(self.first_clicked.emit)
-        pill_layout.addWidget(self.btn_first)
 
         self.btn_prev = QPushButton("◀", self.pill)
         self.btn_prev.setToolTip("Previous page (Left/Up)")
@@ -110,18 +122,12 @@ class ViewerHud(QWidget):
         self.btn_page.clicked.connect(self.jump_clicked.emit)
         pill_layout.addWidget(self.btn_page)
 
-        # Navigation: Next, Last
+        # Navigation: Next
         self.btn_next = QPushButton("▶", self.pill)
         self.btn_next.setToolTip("Next page (Right/Down/Space)")
         self.btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_next.clicked.connect(self.next_clicked.emit)
         pill_layout.addWidget(self.btn_next)
-
-        self.btn_last = QPushButton("⏭", self.pill)
-        self.btn_last.setToolTip("Last page (End)")
-        self.btn_last.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_last.clicked.connect(self.last_clicked.emit)
-        pill_layout.addWidget(self.btn_last)
 
         # Separator
         pill_layout.addWidget(self._make_separator())
@@ -132,6 +138,35 @@ class ViewerHud(QWidget):
         self.btn_mode.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_mode.clicked.connect(self.mode_toggled.emit)
         pill_layout.addWidget(self.btn_mode)
+
+        # Separator
+        pill_layout.addWidget(self._make_separator())
+
+        self.btn_comic_mode = QToolButton(self.pill)
+        self.btn_comic_mode.setText("📚 Custom")
+        self.btn_comic_mode.setToolTip("Choose a comic reading layout")
+        self.btn_comic_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_comic_mode.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        comic_menu = QMenu(self.btn_comic_mode)
+        comic_menu.setStyleSheet(
+            "QMenu { background-color: #2b2b2b; color: #e0e0e0; "
+            "border: 1px solid #444; }"
+            "QMenu::item { padding: 6px 24px 6px 20px; }"
+            "QMenu::item:selected { background-color: #4a90e2; color: #fff; }"
+        )
+        for label, mode in (
+            ("Comics", "comics"),
+            ("Manga", "manga"),
+            ("Webtoon", "webtoon"),
+        ):
+            action = comic_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, selected=mode: self.comic_mode_selected.emit(
+                    selected
+                )
+            )
+        self.btn_comic_mode.setMenu(comic_menu)
+        pill_layout.addWidget(self.btn_comic_mode)
 
         # Separator
         pill_layout.addWidget(self._make_separator())
@@ -178,18 +213,23 @@ class ViewerHud(QWidget):
         """Update page indicator button and enable/disable navigation buttons."""
         if total_pages <= 0:
             self.btn_page.setText("Page 0 / 0")
-            self.btn_first.setEnabled(False)
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
-            self.btn_last.setEnabled(False)
+            self._reserve_page_width(0)
             return
 
         display_idx = current_index + 1 if current_index >= 0 else 1
         self.btn_page.setText(f"Page {display_idx} / {total_pages}")
-        self.btn_first.setEnabled(current_index > 0)
         self.btn_prev.setEnabled(current_index > 0)
         self.btn_next.setEnabled(current_index < total_pages - 1)
-        self.btn_last.setEnabled(current_index < total_pages - 1)
+        self._reserve_page_width(total_pages)
+
+    def _reserve_page_width(self, total_pages: int) -> None:
+        """Keep the widest page count readable instead of letting it compress."""
+        widest_text = f"Page {total_pages} / {total_pages}"
+        text_width = self.btn_page.fontMetrics().horizontalAdvance(widest_text)
+        self.btn_page.setMinimumWidth(text_width + 24)
+        self.adjustSize()
 
     def set_mode(self, is_scroll: bool):
         """Update mode switcher button label."""
@@ -212,6 +252,16 @@ class ViewerHud(QWidget):
             self.btn_fullscreen.setText("⛶")
             self.btn_fullscreen.setToolTip("Enter Fullscreen (F11 or F)")
 
+    def set_comic_mode(self, mode: str) -> None:
+        labels = {
+            "comics": "📚 Comics",
+            "manga": "📖 Manga",
+            "webtoon": "📱 Webtoon",
+            "custom": "🛠 Custom",
+        }
+        self.btn_comic_mode.setText(labels.get(mode, labels["custom"]))
+        self.adjustSize()
+
     def reposition(self, parent_width: int, parent_height: int):
         """Center the HUD horizontally near the bottom of the parent window."""
         self.adjustSize()
@@ -221,33 +271,83 @@ class ViewerHud(QWidget):
         y = parent_height - h - 24  # 24px margin from bottom
         self.setGeometry(x, max(0, y), w, h)
 
-    def on_user_interaction(self):
-        """Call when user moves mouse or interacts to show HUD and restart hide timer."""
-        if not self._is_pinned:
-            if not self.isVisible():
-                self.show()
+    def on_pointer_move(self, parent_y: int) -> None:
+        """Reveal the HUD only while the pointer is near its vertical level."""
+        band_top = self.y() - self.ACTIVATION_MARGIN
+        band_bottom = self.y() + self.height() + self.ACTIVATION_MARGIN
+        is_in_band = band_top <= parent_y <= band_bottom
+        if (
+            is_in_band == self._is_pointer_in_activation_band
+            and not (is_in_band and self.isHidden())
+        ):
+            return
+
+        self._is_pointer_in_activation_band = is_in_band
+        if is_in_band:
+            self._show_with_fade()
+        elif not self.isHidden() and not self._is_mouse_inside:
             self._hide_timer.start()
 
-    def toggle_pin(self):
-        """Toggle pinned state (always visible vs auto-hide)."""
-        self._is_pinned = not self._is_pinned
-        if self._is_pinned:
-            self._hide_timer.stop()
-            self.show()
+    def toggle_visibility(self) -> None:
+        """Toggle the HUD immediately, independent of its hover state."""
+        self._hide_timer.stop()
+        if not self.isHidden() and self._fade_target_visible:
+            self._fade_out()
         else:
-            self._hide_timer.start()
+            self._show_with_fade()
+
+    def hide_immediately(self) -> None:
+        """Reset and hide the HUD without leaving an animation pending."""
+        self._hide_timer.stop()
+        self._fade_animation.stop()
+        self._fade_target_visible = False
+        self._opacity_effect.setOpacity(1.0)
+        self.hide()
+
+    def toggle_pin(self) -> None:
+        """Backwards-compatible name for the HUD visibility shortcut."""
+        self.toggle_visibility()
 
     def enterEvent(self, event):
         self._is_mouse_inside = True
         self._hide_timer.stop()
+        self._show_with_fade()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._is_mouse_inside = False
-        if not self._is_pinned and self.isVisible():
+        if not self.isHidden():
             self._hide_timer.start()
         super().leaveEvent(event)
 
     def _auto_hide(self):
-        if not self._is_pinned and not self._is_mouse_inside:
+        if (
+            not self._is_mouse_inside
+            and not self._is_pointer_in_activation_band
+        ):
+            self._fade_out()
+
+    def _show_with_fade(self) -> None:
+        start_opacity = (
+            self._opacity_effect.opacity() if not self.isHidden() else 0.0
+        )
+        self._fade_target_visible = True
+        self._fade_animation.stop()
+        self._opacity_effect.setOpacity(start_opacity)
+        self.show()
+        self.raise_()
+        self._fade_animation.setStartValue(start_opacity)
+        self._fade_animation.setEndValue(1.0)
+        self._fade_animation.start()
+
+    def _fade_out(self) -> None:
+        self._fade_target_visible = False
+        self._fade_animation.stop()
+        self._fade_animation.setStartValue(self._opacity_effect.opacity())
+        self._fade_animation.setEndValue(0.0)
+        self._fade_animation.start()
+
+    def _finish_fade(self) -> None:
+        if self._opacity_effect.opacity() <= 0.0:
             self.hide()
+            self._opacity_effect.setOpacity(1.0)

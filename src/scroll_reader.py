@@ -96,6 +96,10 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._zoom_factor: float = 1.0
         self._current_visible_index: int = 0
         self._pending_scroll_index: Optional[int] = None
+        self._double_page = False
+        self._invert_page_order = False
+        self._page_spacing = True
+        self._detect_double_spreads = True
 
         # Common control handler emitting signals that activate viewer functions
         self._controls = CommonViewerControls(self)
@@ -141,6 +145,47 @@ class ScrollReaderWidget(QAbstractScrollArea):
     @property
     def pixmap_bytes_used(self) -> int:
         return self._pixmap_bytes_used
+
+    @property
+    def double_page(self) -> bool:
+        return self._double_page
+
+    @property
+    def invert_page_order(self) -> bool:
+        return self._invert_page_order
+
+    @property
+    def page_spacing(self) -> bool:
+        return self._page_spacing
+
+    @property
+    def detect_double_spreads(self) -> bool:
+        return self._detect_double_spreads
+
+    def set_layout_options(
+        self,
+        *,
+        double_page: Optional[bool] = None,
+        invert_page_order: Optional[bool] = None,
+        page_spacing: Optional[bool] = None,
+        detect_double_spreads: Optional[bool] = None,
+    ) -> None:
+        """Update comic layout options while preserving the reading position."""
+        anchor = self._capture_resize_anchor()
+        if double_page is not None:
+            self._double_page = double_page
+        if invert_page_order is not None:
+            self._invert_page_order = invert_page_order
+        if page_spacing is not None:
+            self._page_spacing = page_spacing
+        if detect_double_spreads is not None:
+            self._detect_double_spreads = detect_double_spreads
+
+        self._relayout()
+        if anchor is not None:
+            self._restore_resize_anchor(anchor)
+        self._update_visible_images()
+        self.viewport().update()
 
     def current_visible_index(self) -> int:
         return self._current_visible_index
@@ -292,7 +337,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         return size
 
     def _relayout(self) -> None:
-        """Compute layout: all images share uniform width while preserving aspect ratios."""
+        """Compute single-page or paired comic rows without changing page order."""
         if not self._image_list:
             self._image_rects.clear()
             self.verticalScrollBar().setRange(0, 0)
@@ -306,33 +351,15 @@ class ScrollReaderWidget(QAbstractScrollArea):
         if vp_h <= 0:
             vp_h = self.height() if self.height() > 0 else 720
 
-        # Uniform width across all images: target_width
-        target_width = max(50, int(round(vp_w * self._zoom_factor)))
-
-        self._image_rects = []
-        current_y = 0
-
-        for path in self._image_list:
-            src_size = self._get_source_size(path)
-            src_w = max(1, src_size.width())
-            src_h = max(1, src_size.height())
-
-            img_w = target_width
-            # Height preserves native aspect ratio
-            img_h = max(1, int(round(target_width * (src_h / src_w))))
-
-            # Horizontal placement: centered when narrower than viewport
-            if target_width < vp_w:
-                img_x = (vp_w - target_width) // 2
-            else:
-                img_x = 0
-
-            rect = QRect(img_x, current_y, img_w, img_h)
-            self._image_rects.append(rect)
-            current_y += img_h + self.SPACING
-
-        total_content_h = max(0, current_y - self.SPACING if self._image_rects else 0)
-        total_content_w = target_width
+        spacing = self.SPACING if self._page_spacing else 0
+        if self._double_page:
+            total_content_w, total_content_h = self._layout_double_pages(
+                vp_w, spacing
+            )
+        else:
+            total_content_w, total_content_h = self._layout_single_pages(
+                vp_w, spacing
+            )
 
         # Update scrollbar ranges
         max_v_scroll = max(0, total_content_h - vp_h)
@@ -346,6 +373,112 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self.horizontalScrollBar().setSingleStep(self.SCROLL_STEP)
         else:
             self.horizontalScrollBar().setRange(0, 0)
+
+    def _layout_single_pages(self, viewport_width: int, spacing: int) -> tuple[int, int]:
+        target_width = max(50, int(round(viewport_width * self._zoom_factor)))
+        content_x = max(0, (viewport_width - target_width) // 2)
+        self._image_rects = []
+        current_y = 0
+
+        for path in self._image_list:
+            image_height = self._scaled_height(path, target_width)
+            self._image_rects.append(
+                QRect(content_x, current_y, target_width, image_height)
+            )
+            current_y += image_height + spacing
+
+        total_height = max(0, current_y - spacing)
+        return target_width, total_height
+
+    def _layout_double_pages(self, viewport_width: int, spacing: int) -> tuple[int, int]:
+        page_width = max(
+            50,
+            int(round(((viewport_width - spacing) / 2.0) * self._zoom_factor)),
+        )
+        content_width = page_width * 2 + spacing
+        content_x = max(0, (viewport_width - content_width) // 2)
+        rects = [QRect() for _ in self._image_list]
+        spread_indices = self._double_spread_indices()
+        current_y = 0
+
+        # Comic covers are always a centred, normal-sized page of their own.
+        cover_height = self._scaled_height(self._image_list[0], page_width)
+        cover_x = content_x + (content_width - page_width) // 2
+        rects[0] = QRect(cover_x, current_y, page_width, cover_height)
+        current_y += cover_height + spacing
+
+        index = 1
+        while index < len(self._image_list):
+            if index in spread_indices:
+                spread_height = self._scaled_height(
+                    self._image_list[index], content_width
+                )
+                rects[index] = QRect(
+                    content_x, current_y, content_width, spread_height
+                )
+                current_y += spread_height + spacing
+                index += 1
+                continue
+
+            next_index = index + 1
+            can_pair = (
+                next_index < len(self._image_list)
+                and next_index not in spread_indices
+            )
+            first_height = self._scaled_height(self._image_list[index], page_width)
+            if not can_pair:
+                single_x = content_x + (content_width - page_width) // 2
+                rects[index] = QRect(
+                    single_x, current_y, page_width, first_height
+                )
+                current_y += first_height + spacing
+                index += 1
+                continue
+
+            second_height = self._scaled_height(
+                self._image_list[next_index], page_width
+            )
+            left_x = content_x
+            right_x = content_x + page_width + spacing
+            if self._invert_page_order:
+                first_x, second_x = right_x, left_x
+            else:
+                first_x, second_x = left_x, right_x
+            rects[index] = QRect(
+                first_x, current_y, page_width, first_height
+            )
+            rects[next_index] = QRect(
+                second_x, current_y, page_width, second_height
+            )
+            current_y += max(first_height, second_height) + spacing
+            index += 2
+
+        self._image_rects = rects
+        total_height = max(0, current_y - spacing)
+        return content_width, total_height
+
+    def _scaled_height(self, path: str, target_width: int) -> int:
+        source_size = self._get_source_size(path)
+        source_width = max(1, source_size.width())
+        source_height = max(1, source_size.height())
+        return max(1, int(round(target_width * source_height / source_width)))
+
+    def _double_spread_indices(self) -> Set[int]:
+        if not self._detect_double_spreads or not self._image_list:
+            return set()
+        widths = [
+            self._get_source_size(path).width()
+            for path in self._image_list
+            if self._get_source_size(path).width() > 0
+        ]
+        if not widths:
+            return set()
+        average_width = sum(widths) / len(widths)
+        return {
+            index
+            for index, path in enumerate(self._image_list)
+            if self._get_source_size(path).width() > average_width * 1.5
+        }
 
     def _capture_resize_anchor(
         self,
@@ -394,7 +527,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
         # Detect which image is at reading line
         current_index = 0
         for i, rect in enumerate(self._image_rects):
-            if rect.y() <= read_line < rect.y() + rect.height() + self.SPACING:
+            spacing = self.SPACING if self._page_spacing else 0
+            if rect.y() <= read_line < rect.y() + rect.height() + spacing:
                 current_index = i
                 break
             elif rect.y() > read_line:

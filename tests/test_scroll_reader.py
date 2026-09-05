@@ -297,6 +297,61 @@ class TestScrollReaderWidget(unittest.TestCase):
                 f"Gap between image {i} and {i+1} is {gap}, expected {ScrollReaderWidget.SPACING}",
             )
 
+    def test_double_page_keeps_cover_alone_and_pairs_following_pages(self):
+        self.widget.set_layout_options(double_page=True)
+        rects = self.widget.image_rects
+
+        self.assertEqual(rects[0].width(), rects[1].width())
+        self.assertEqual(
+            rects[0].x(),
+            (self.widget.viewport().width() - rects[0].width()) // 2,
+        )
+        self.assertGreater(rects[1].y(), rects[0].y())
+        self.assertEqual(rects[1].y(), rects[2].y())
+        self.assertLess(rects[1].x(), rects[2].x())
+
+    def test_inverted_double_page_places_first_page_of_pair_on_right(self):
+        self.widget.set_layout_options(
+            double_page=True, invert_page_order=True
+        )
+        rects = self.widget.image_rects
+
+        self.assertEqual(rects[1].y(), rects[2].y())
+        self.assertGreater(rects[1].x(), rects[2].x())
+
+    def test_disabling_page_spacing_removes_vertical_gaps(self):
+        self.widget.set_layout_options(page_spacing=False)
+        rects = self.widget.image_rects
+
+        for current, following in zip(rects, rects[1:]):
+            self.assertEqual(following.y(), current.y() + current.height())
+
+    def test_detected_spread_and_page_before_it_each_use_their_own_row(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(400, 800), (400, 800), (400, 800), (400, 800), (1000, 500)]
+        ):
+            path = os.path.join(self.temp_dir, f"spread_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("red"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True
+        )
+        self.widget.set_images(paths)
+        rects = self.widget.image_rects
+
+        self.assertEqual(rects[1].y(), rects[2].y())
+        self.assertNotEqual(rects[3].y(), rects[2].y())
+        self.assertNotEqual(rects[4].y(), rects[3].y())
+        self.assertEqual(rects[3].width(), rects[1].width())
+        self.assertEqual(
+            rects[4].width(),
+            rects[3].width() * 2 + ScrollReaderWidget.SPACING,
+        )
+
     def test_scroll_to_index(self):
         """scroll_to_index positions the vertical scrollbar at the image's top."""
         rects = self.widget.image_rects

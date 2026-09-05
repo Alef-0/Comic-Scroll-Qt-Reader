@@ -32,10 +32,12 @@ class ImageViewerWidget(QWidget):
     toggle_mode_requested = pyqtSignal()
     mode_single_requested = pyqtSignal()
     mode_scroll_requested = pyqtSignal()
+    page_scroll_requested = pyqtSignal(int, float, float)
 
     MIN_ZOOM = 0.1
     MAX_ZOOM = 50.0
     QUALITY_DELAY_MS = 100
+    WHEEL_SCROLL_PIXELS = 80.0
     DETAIL_BUFFER_BYTES = 64 * 1024 * 1024
 
     def __init__(self, parent=None):
@@ -185,6 +187,22 @@ class ImageViewerWidget(QWidget):
 
         self._begin_interaction()
         self.update()
+
+    def restore_scroll_position(
+        self, zoom_factor: float, horizontal_ratio: float, at_top: bool
+    ) -> None:
+        """Restore a scroll-like position after crossing onto another page."""
+        self._zoom_factor = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom_factor))
+        limits = self._pan_limits()
+        self._pan_offset = QPointF(
+            max(-1.0, min(1.0, horizontal_ratio)) * limits.x(),
+            limits.y() if at_top else -limits.y(),
+        )
+        self._clamp_pan_offset()
+        self._update_pan_cursor()
+        self.update()
+        self.zoom_changed.emit(self._zoom_factor)
+        self._schedule_quality_update()
 
     def zoom_at(self, scale_factor: float, anchor_pos: Optional[QPointF] = None):
         """Zoom around the viewport centre while preserving aspect ratio."""
@@ -406,8 +424,47 @@ class ImageViewerWidget(QWidget):
             super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
+        if self._zoom_factor > 1.0 and self._handle_zoomed_wheel(event):
+            event.accept()
+            return
         if not self._controls.handle_wheel(event):
             super().wheelEvent(event)
+
+    def _handle_zoomed_wheel(self, event: QWheelEvent) -> bool:
+        """Pan a zoomed page, crossing pages only beyond a vertical edge."""
+        pixel_delta = event.pixelDelta().y()
+        angle_delta = event.angleDelta().y()
+        if pixel_delta == 0 and angle_delta == 0:
+            return False
+
+        scroll_delta = (
+            float(pixel_delta)
+            if pixel_delta
+            else (angle_delta / 120.0) * self.WHEEL_SCROLL_PIXELS
+        )
+        limits = self._pan_limits()
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+wheel remains the standard zoom gesture.
+            return False
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            self.pan_by(scroll_delta, 0.0)
+            return True
+
+        at_top = self._pan_offset.y() >= limits.y() - 0.5
+        at_bottom = self._pan_offset.y() <= -limits.y() + 0.5
+        if (scroll_delta > 0 and at_top) or (scroll_delta < 0 and at_bottom):
+            horizontal_ratio = (
+                self._pan_offset.x() / limits.x() if limits.x() > 0.0 else 0.0
+            )
+            direction = -1 if scroll_delta > 0 else 1
+            self.page_scroll_requested.emit(
+                direction, self._zoom_factor, horizontal_ratio
+            )
+            return True
+
+        self.pan_by(0.0, scroll_delta)
+        return True
 
 
 # Backwards compatibility alias

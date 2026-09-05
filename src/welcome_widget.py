@@ -120,7 +120,7 @@ class WelcomeWidget(QWidget):
         self.btn_open_folder.clicked.connect(self.open_folder_requested.emit)
         btn_layout.addWidget(self.btn_open_folder, 1)
 
-        self.btn_about = QPushButton("ℹ️  About\nProject & credits", self.card)
+        self.btn_about = QPushButton("ℹ️  About\nProject and Credits", self.card)
         self.btn_about.setObjectName("welcomeAction")
         self.btn_about.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_about.clicked.connect(self.about_requested.emit)

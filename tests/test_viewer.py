@@ -6,13 +6,21 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QImage, QPixmap, QColor, QKeyEvent, QMouseEvent
-from PyQt6.QtCore import Qt, QSize, QRect, QPointF, QEventLoop, QTimer
+from PyQt6.QtGui import (
+    QColor,
+    QImage,
+    QKeyEvent,
+    QMouseEvent,
+    QPixmap,
+    QWheelEvent,
+)
+from PyQt6.QtCore import Qt, QSize, QRect, QPoint, QPointF, QEventLoop, QTimer
 
 from src.viewer import (
     ImageViewerWidget,
     ScaledImageLabel,
     MainWindow,
+    ViewerMode,
     natural_sort_key,
 )
 from src.image_pipeline import (
@@ -69,6 +77,18 @@ class TestImageViewerWidget(unittest.TestCase):
 
     def tearDown(self):
         self.viewer.deleteLater()
+
+    def _make_wheel(self, delta_y, modifiers=Qt.KeyboardModifier.NoModifier):
+        return QWheelEvent(
+            QPointF(200, 200),
+            QPointF(200, 200),
+            QPoint(),
+            QPoint(0, delta_y),
+            Qt.MouseButton.NoButton,
+            modifiers,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
 
     def test_initial_state(self):
         """Verify initial state of ImageViewerWidget."""
@@ -229,6 +249,58 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertEqual(self.viewer.zoom_factor, 1.0)
         self.assertEqual(self.viewer.pan_offset, QPointF(0, 0))
         self.assertEqual(self.viewer.target_rect(), QRect(0, 100, 800, 400))
+
+    def test_zoomed_wheel_pans_vertically_then_requests_next_page_at_edge(self):
+        image = QImage(400, 800, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(image))
+        self.viewer.zoom_at(2.0)
+        transitions = []
+        self.viewer.page_scroll_requested.connect(
+            lambda *args: transitions.append(args)
+        )
+
+        self.viewer.wheelEvent(self._make_wheel(-120))
+        self.assertEqual(self.viewer.pan_offset.y(), -80.0)
+        self.assertEqual(transitions, [])
+
+        self.viewer.pan_by(0.0, -10000.0)
+        self.viewer.wheelEvent(self._make_wheel(-120))
+        self.assertEqual(transitions[0][0], 1)
+        self.assertEqual(transitions[0][1], 2.0)
+
+    def test_shift_wheel_pans_horizontally_while_zoomed(self):
+        image = QImage(800, 400, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(image))
+        self.viewer.zoom_at(2.0)
+
+        self.viewer.wheelEvent(
+            self._make_wheel(-120, Qt.KeyboardModifier.ShiftModifier)
+        )
+
+        self.assertEqual(self.viewer.zoom_factor, 2.0)
+        self.assertEqual(self.viewer.pan_offset.x(), -80.0)
+
+    def test_ctrl_wheel_still_zooms_while_zoomed(self):
+        image = QImage(800, 400, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(image))
+        self.viewer.zoom_at(2.0)
+
+        self.viewer.wheelEvent(
+            self._make_wheel(-120, Qt.KeyboardModifier.ControlModifier)
+        )
+
+        self.assertEqual(self.viewer.zoom_factor, 1.6)
+
+    def test_scroll_transition_restores_zoom_horizontal_area_and_page_edge(self):
+        image = QImage(800, 800, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(image))
+
+        self.viewer.restore_scroll_position(2.0, 0.5, at_top=True)
+
+        limits = self.viewer._pan_limits()
+        self.assertEqual(self.viewer.zoom_factor, 2.0)
+        self.assertEqual(self.viewer.pan_offset.x(), limits.x() * 0.5)
+        self.assertEqual(self.viewer.pan_offset.y(), limits.y())
 
     def test_left_drag_only_activates_when_image_overflows(self):
         """The single viewer does not enter dragging state at fit size."""
@@ -471,6 +543,22 @@ class TestMainWindow(unittest.TestCase):
         window.first_image()
         self.assert_loaded(window, 0)
         self.assertEqual(window.current_index, 0)
+        window.deleteLater()
+
+    def test_scroll_page_transition_preserves_single_view_position(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_mode(ViewerMode.SINGLE)
+
+        window._scroll_single_page(1, 2.0, 0.5)
+        self.assert_loaded(window, 1)
+
+        limits = window.image_viewer._pan_limits()
+        self.assertEqual(window.image_viewer.zoom_factor, 2.0)
+        self.assertAlmostEqual(
+            window.image_viewer.pan_offset.x(), limits.x() * 0.5
+        )
+        self.assertEqual(window.image_viewer.pan_offset.y(), limits.y())
         window.deleteLater()
 
     def test_initial_file_selects_correct_index(self):
