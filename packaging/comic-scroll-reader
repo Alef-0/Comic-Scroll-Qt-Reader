@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Launcher script for Comic Scroll Reader system packages."""
+import os
+import sys
+
+APP_DIR = "/usr/lib/comic-scroll-reader"
+if os.path.isdir(APP_DIR) and APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
+from comic_scroll_reader.__main__ import main
+
+if __name__ == "__main__":
+    main()

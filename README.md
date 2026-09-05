@@ -88,26 +88,6 @@ sudo rpm -i comic-scroll-reader-1.0.0-1.x86_64.rpm
 
 ---
 
-### 🪟 Windows (`.exe` Setup)
-
-1. Download **`comic-scroll-reader-1.0.0-setup.exe`**.
-2. Run the setup wizard to install Comic Scroll Reader to your `Program Files`.
-3. Features:
-   - Optional Desktop shortcut and Start Menu entry.
-   - File associations for comics, images, and PDFs.
-   - Explorer right-click context menu: **"Open with Comic Scroll Reader"** on any folder.
-   - Clean uninstaller registered in Windows Settings.
-
----
-
-### 🍏 macOS (`.dmg`)
-
-1. Download **`Comic-Scroll-Reader-1.0.0.dmg`**.
-2. Open the `.dmg` disk image and drag **Comic Scroll Reader.app** into your **Applications** folder.
-3. Launch from Launchpad or Spotlight.
-
----
-
 ### 🐍 Running from Source (Any OS)
 
 If you prefer running directly in Python:
@@ -246,65 +226,6 @@ comic-scroll-reader /path/to/cover.webp
 | **Comic Folders** | Any directory containing supported image formats (sorted numerically) |
 | **PDF Documents** | `.pdf` (vector & raster, Google PDFium accelerated) |
 | **Raster Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.avif`, `.tiff` |
-
----
-
-## 🏗️ Project Architecture
-
-```
-Comic-Scroll-Qt-Reader/
-├── build_installers.sh       # Unified multi-platform installer builder (.deb, .rpm, .exe, .dmg)
-├── comic-scroll-reader.sh    # Quick launcher script for source runs
-├── Makefile                  # Build targets (make deb, make rpm, make installers, make test)
-├── requirements.txt          # Python dependencies (PyQt6, pypdfium2)
-├── packaging/                # Multi-platform installer assets
-│   ├── comic-scroll-reader.desktop   # FreeDesktop application entry
-│   ├── comic-scroll-reader.spec      # PyInstaller bundling spec for Linux
-│   ├── com.github.alef0...metainfo.xml # AppStream metadata
-│   ├── control.in                    # Debian control template
-│   ├── copyright                     # License & copyright notice
-│   ├── postinst / postrm             # Debian maintainer scripts
-│   ├── rpm/
-│   │   └── comic-scroll-reader.spec  # RPM package specification
-│   ├── windows/
-│   │   ├── installer.iss             # Inno Setup wizard installer script
-│   │   ├── comic-scroll-reader-win.spec # PyInstaller Windows spec
-│   │   ├── build_windows.bat         # Batch builder for Windows
-│   │   └── build_windows.ps1         # PowerShell builder for Windows
-│   └── mac/
-│       ├── comic-scroll-reader-mac.spec # PyInstaller macOS spec
-│       └── build_mac.sh              # macOS DMG builder
-├── .github/workflows/
-│   └── release.yml           # Automated multi-platform GitHub Release workflow
-├── comic_scroll_reader/      # Main application package
-│   ├── __main__.py           # CLI entry point & application bootstrap
-│   ├── main_window.py        # Main application window & action routing
-│   ├── scroll_reader.py      # Continuous vertical scroll view
-│   ├── single_viewer.py      # Classic single page view
-│   ├── image_pipeline.py     # Asynchronous image decode & cache pipeline
-│   ├── pdf_handler.py        # PDFium document loader & page cache
-│   ├── hud_overlay.py        # Floating auto-hiding status & control HUD
-│   ├── input_controls.py     # Unified mouse and keyboard event handling
-│   ├── shortcuts_dialog.py   # Interactive keyboard shortcut reference
-│   ├── about_dialog.py       # Styled About dialog
-│   ├── welcome_widget.py     # Welcome screen with quick actions
-│   ├── resources.py          # Shared paths & metadata
-│   └── assets/               # High-resolution application icons
-└── tests/                    # Automated test suite (131 tests)
-```
-
----
-
-## 🧪 Testing
-
-Run the test suite using `pytest`:
-```bash
-make test
-```
-Or directly:
-```bash
-PYTHONPATH=. .venv/bin/pytest tests
-```
 
 ---
 

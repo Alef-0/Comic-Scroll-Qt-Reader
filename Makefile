@@ -5,8 +5,8 @@ all: help
 help:
 	@echo "Comic Scroll Reader - Build & Development Targets"
 	@echo ""
-	@echo "  make deb        - Compile and build standalone .deb installer"
-	@echo "  make rpm        - Compile and build Red Hat/Fedora .rpm installer"
+	@echo "  make deb        - Compile and build lightweight .deb installer (system Qt6)"
+	@echo "  make rpm        - Compile and build lightweight .rpm installer (system Qt6)"
 	@echo "  make installers - Compile all available host installers"
 	@echo "  make run        - Run reader from source in current environment"
 	@echo "  make test       - Run unit test suite"

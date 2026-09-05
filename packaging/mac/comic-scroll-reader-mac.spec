@@ -32,12 +32,18 @@ for pkg in ('pypdfium2', 'pypdfium2_raw'):
     binaries += pkg_binaries
     hiddenimports += pkg_hidden
 
-# Collect PyQt6 modules, plugins, and metadata
-for pkg in ('PyQt6',):
-    pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
-    datas += pkg_datas
-    binaries += pkg_binaries
-    hiddenimports += pkg_hidden
+# In excludes, explicitly prune heavy unused PyQt6 modules
+qt_excludes = [
+    'tkinter', 'matplotlib', 'scipy', 'numpy', 'pytest', 'unittest',
+    'PyQt6.QtBluetooth', 'PyQt6.QtDesigner', 'PyQt6.QtHelp',
+    'PyQt6.QtMultimedia', 'PyQt6.QtMultimediaWidgets', 'PyQt6.QtNetwork',
+    'PyQt6.QtNfc', 'PyQt6.QtPdf', 'PyQt6.QtPositioning', 'PyQt6.QtQml',
+    'PyQt6.QtQuick', 'PyQt6.QtQuick3D', 'PyQt6.QtQuickWidgets',
+    'PyQt6.QtRemoteObjects', 'PyQt6.QtSensors', 'PyQt6.QtSerialPort',
+    'PyQt6.QtSpatialAudio', 'PyQt6.QtSql', 'PyQt6.QtSvg', 'PyQt6.QtTest',
+    'PyQt6.QtVirtualKeyboard', 'PyQt6.QtWebChannel', 'PyQt6.QtWebSockets',
+    'PyQt6.QtXml',
+]
 
 a = Analysis(
     [str(ROOT_DIR / 'packaging' / 'launcher.py')],
@@ -48,7 +54,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'scipy', 'numpy', 'pytest', 'unittest'],
+    excludes=qt_excludes,
     noarchive=False,
     optimize=0,
 )

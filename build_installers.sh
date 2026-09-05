@@ -37,19 +37,29 @@ Comic Scroll Reader - Multi-Platform Installer Builder (v${VERSION})
 Usage: ./build_installers.sh [OPTIONS]
 
 Options:
-  --deb         Build Debian / Ubuntu package (.deb)
-  --rpm         Build Red Hat / Fedora package (.rpm)
-  --windows     Build Windows installer (.exe setup wizard)
-  --mac         Build macOS Disk Image (.dmg)
-  --all         Build all target installers supported on the current host
-  --clean       Clean build and dist directories before packaging
-  -h, --help    Display this help message
+  --deb             Build lightweight Debian package (.deb, uses system Qt6)
+  --rpm             Build lightweight Red Hat/Fedora package (.rpm, uses system Qt6)
+  --standalone-deb  Build standalone Debian package (bundles full runtime)
+  --standalone-rpm  Build standalone RPM package (bundles full runtime)
+  --standalone      Build standalone PyInstaller application bundle
+  --windows         Build Windows installer (.exe setup wizard)
+  --mac             Build macOS Disk Image (.dmg)
+  --all             Build all target installers supported on the current host
+  --clean           Clean build and dist directories before packaging
+  -h, --help        Display this help message
 
 Examples:
   ./build_installers.sh --deb
   ./build_installers.sh --rpm
   ./build_installers.sh --all
 EOF
+}
+
+ensure_dependencies() {
+    if ! "$PYTHON_BIN" -c "import pypdfium2, pypdfium2_raw" >/dev/null 2>&1; then
+        echo "Ensuring required dependencies are installed..."
+        "$PYTHON_BIN" -m pip install -r "$PROJECT_ROOT/requirements.txt"
+    fi
 }
 
 ensure_pyinstaller() {
@@ -93,7 +103,7 @@ build_standalone_bundle() {
 
 build_deb() {
     echo "======================================================================"
-    echo " Building Debian package (.deb)..."
+    echo " Building lightweight Debian package (.deb)..."
     echo "======================================================================"
 
     if ! command -v dpkg-deb >/dev/null 2>&1; then
@@ -102,11 +112,17 @@ build_deb() {
         return 1
     fi
 
-    build_standalone_bundle
+    ensure_dependencies
+
+    local pypdfium2_dir
+    local pypdfium2_raw_dir
+    local pypdfium2_cfg_dir
+    pypdfium2_dir="$("$PYTHON_BIN" -c "import pypdfium2, os; print(os.path.dirname(pypdfium2.__file__))")"
+    pypdfium2_raw_dir="$("$PYTHON_BIN" -c "import pypdfium2_raw, os; print(os.path.dirname(pypdfium2_raw.__file__))")"
+    pypdfium2_cfg_dir="$("$PYTHON_BIN" -c "import pypdfium2_cfg, os; print(os.path.dirname(pypdfium2_cfg.__file__))" 2>/dev/null || true)"
 
     local deb_pkg_name="comic-scroll-reader_${VERSION}_${DEB_ARCH}"
     local stage_dir="$BUILD_DIR/deb_stage/$deb_pkg_name"
-    local bundle_src="$BUILD_DIR/pyinstaller_dist/comic-scroll-reader"
 
     rm -rf "$stage_dir"
     mkdir -p \
@@ -119,9 +135,17 @@ build_deb() {
         "$stage_dir/usr/share/doc/comic-scroll-reader" \
         "$stage_dir/DEBIAN"
 
-    # Copy files
-    cp -a "$bundle_src/." "$stage_dir/usr/lib/comic-scroll-reader/"
-    ln -s "../lib/comic-scroll-reader/comic-scroll-reader" "$stage_dir/usr/bin/comic-scroll-reader"
+    # Copy application files and vendored PDFium libraries
+    cp -a "$PROJECT_ROOT/comic_scroll_reader" "$stage_dir/usr/lib/comic-scroll-reader/"
+    cp -a "$pypdfium2_dir" "$stage_dir/usr/lib/comic-scroll-reader/"
+    cp -a "$pypdfium2_raw_dir" "$stage_dir/usr/lib/comic-scroll-reader/"
+    if [ -n "$pypdfium2_cfg_dir" ] && [ -d "$pypdfium2_cfg_dir" ]; then
+        cp -a "$pypdfium2_cfg_dir" "$stage_dir/usr/lib/comic-scroll-reader/"
+    fi
+    find "$stage_dir/usr/lib/comic-scroll-reader" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
+    # Install launcher and system desktop files
+    install -m 755 "$PACKAGING_DIR/comic-scroll-reader" "$stage_dir/usr/bin/comic-scroll-reader"
     cp "$PACKAGING_DIR/comic-scroll-reader.desktop" "$stage_dir/usr/share/applications/"
     cp "$PROJECT_ROOT/comic_scroll_reader/assets/csr_app_icon.png" "$stage_dir/usr/share/icons/hicolor/512x512/apps/comic-scroll-reader.png"
     cp "$PROJECT_ROOT/comic_scroll_reader/assets/csr_app_icon.png" "$stage_dir/usr/share/pixmaps/comic-scroll-reader.png"
@@ -144,19 +168,76 @@ build_deb() {
     find "$stage_dir" -type d -exec chmod 755 {} +
     find "$stage_dir" -type f -exec chmod 644 {} +
     find "$stage_dir" -type f -name "*.so*" -exec chmod 755 {} +
+    chmod 755 "$stage_dir/usr/bin/comic-scroll-reader"
+    chmod 755 "$stage_dir/DEBIAN/postinst" "$stage_dir/DEBIAN/postrm"
+    chmod 644 "$stage_dir/DEBIAN/control" "$stage_dir/DEBIAN/md5sums" "$stage_dir/usr/share/doc/comic-scroll-reader/copyright"
+
+    local output_deb="$DIST_DIR/${deb_pkg_name}.deb"
+    dpkg-deb -Zxz --build --root-owner-group "$stage_dir" "$output_deb"
+
+    echo ">>> Generated Debian package: $output_deb ($(du -h "$output_deb" | awk '{print $1}'))"
+}
+
+build_deb_standalone() {
+    echo "======================================================================"
+    echo " Building Standalone Debian package (.deb, bundled runtime)..."
+    echo "======================================================================"
+
+    if ! command -v dpkg-deb >/dev/null 2>&1; then
+        echo "Error: 'dpkg-deb' is required but not installed." >&2
+        return 1
+    fi
+
+    build_standalone_bundle
+
+    local deb_pkg_name="comic-scroll-reader-standalone_${VERSION}_${DEB_ARCH}"
+    local stage_dir="$BUILD_DIR/deb_stage/$deb_pkg_name"
+    local bundle_src="$BUILD_DIR/pyinstaller_dist/comic-scroll-reader"
+
+    rm -rf "$stage_dir"
+    mkdir -p \
+        "$stage_dir/usr/lib/comic-scroll-reader" \
+        "$stage_dir/usr/bin" \
+        "$stage_dir/usr/share/applications" \
+        "$stage_dir/usr/share/icons/hicolor/512x512/apps" \
+        "$stage_dir/usr/share/pixmaps" \
+        "$stage_dir/usr/share/metainfo" \
+        "$stage_dir/usr/share/doc/comic-scroll-reader" \
+        "$stage_dir/DEBIAN"
+
+    cp -a "$bundle_src/." "$stage_dir/usr/lib/comic-scroll-reader/"
+    ln -s "../lib/comic-scroll-reader/comic-scroll-reader" "$stage_dir/usr/bin/comic-scroll-reader"
+    cp "$PACKAGING_DIR/comic-scroll-reader.desktop" "$stage_dir/usr/share/applications/"
+    cp "$PROJECT_ROOT/comic_scroll_reader/assets/csr_app_icon.png" "$stage_dir/usr/share/icons/hicolor/512x512/apps/comic-scroll-reader.png"
+    cp "$PROJECT_ROOT/comic_scroll_reader/assets/csr_app_icon.png" "$stage_dir/usr/share/pixmaps/comic-scroll-reader.png"
+    cp "$PACKAGING_DIR/com.github.alef0.comic_scroll_reader.metainfo.xml" "$stage_dir/usr/share/metainfo/"
+    cp "$PACKAGING_DIR/copyright" "$stage_dir/usr/share/doc/comic-scroll-reader/copyright"
+    cp "$PACKAGING_DIR/postinst" "$stage_dir/DEBIAN/postinst"
+    cp "$PACKAGING_DIR/postrm" "$stage_dir/DEBIAN/postrm"
+
+    local installed_size
+    installed_size="$(du -sk "$stage_dir/usr" | awk '{print $1}')"
+    sed -e "s/@ARCH@/$DEB_ARCH/g" \
+        -e "s/@INSTALLED_SIZE@/$installed_size/g" \
+        -e "s/Depends:.*/Depends: libc6 (>= 2.34), libgl1, libx11-6, libxcb1, libxkbcommon0/g" \
+        "$PACKAGING_DIR/control.in" > "$stage_dir/DEBIAN/control"
+
+    (cd "$stage_dir" && find usr -type f -exec md5sum {} + > DEBIAN/md5sums)
+    find "$stage_dir" -type d -exec chmod 755 {} +
+    find "$stage_dir" -type f -exec chmod 644 {} +
+    find "$stage_dir" -type f -name "*.so*" -exec chmod 755 {} +
     chmod 755 "$stage_dir/usr/lib/comic-scroll-reader/comic-scroll-reader"
     chmod 755 "$stage_dir/DEBIAN/postinst" "$stage_dir/DEBIAN/postrm"
     chmod 644 "$stage_dir/DEBIAN/control" "$stage_dir/DEBIAN/md5sums" "$stage_dir/usr/share/doc/comic-scroll-reader/copyright"
 
     local output_deb="$DIST_DIR/${deb_pkg_name}.deb"
-    dpkg-deb --build --root-owner-group "$stage_dir" "$output_deb"
-
-    echo ">>> Generated Debian package: $output_deb ($(du -h "$output_deb" | awk '{print $1}'))"
+    dpkg-deb -Zxz --build --root-owner-group "$stage_dir" "$output_deb"
+    echo ">>> Generated Standalone Debian package: $output_deb ($(du -h "$output_deb" | awk '{print $1}'))"
 }
 
 build_rpm() {
     echo "======================================================================"
-    echo " Building Red Hat / Fedora package (.rpm)..."
+    echo " Building lightweight Red Hat / Fedora package (.rpm)..."
     echo "======================================================================"
 
     if ! command -v rpmbuild >/dev/null 2>&1; then
@@ -168,14 +249,29 @@ build_rpm() {
         return 0
     fi
 
-    build_standalone_bundle
+    ensure_dependencies
+
+    local pypdfium2_dir
+    local pypdfium2_raw_dir
+    local pypdfium2_cfg_dir
+    pypdfium2_dir="$("$PYTHON_BIN" -c "import pypdfium2, os; print(os.path.dirname(pypdfium2.__file__))")"
+    pypdfium2_raw_dir="$("$PYTHON_BIN" -c "import pypdfium2_raw, os; print(os.path.dirname(pypdfium2_raw.__file__))")"
+    pypdfium2_cfg_dir="$("$PYTHON_BIN" -c "import pypdfium2_cfg, os; print(os.path.dirname(pypdfium2_cfg.__file__))" 2>/dev/null || true)"
 
     local rpm_topdir="$BUILD_DIR/rpm_stage"
     local rpm_sources="$rpm_topdir/SOURCES"
     rm -rf "$rpm_topdir"
-    mkdir -p "$rpm_sources/bundle" "$rpm_topdir/SPECS" "$rpm_topdir/RPMS" "$rpm_topdir/SRPMS" "$rpm_topdir/BUILD" "$rpm_topdir/BUILDROOT"
+    mkdir -p "$rpm_sources" "$rpm_topdir/SPECS" "$rpm_topdir/RPMS" "$rpm_topdir/SRPMS" "$rpm_topdir/BUILD" "$rpm_topdir/BUILDROOT" "$rpm_topdir/tmp" "$rpm_topdir/rpmdb"
 
-    cp -a "$BUILD_DIR/pyinstaller_dist/comic-scroll-reader/." "$rpm_sources/bundle/"
+    cp -a "$PROJECT_ROOT/comic_scroll_reader" "$rpm_sources/"
+    cp -a "$pypdfium2_dir" "$rpm_sources/"
+    cp -a "$pypdfium2_raw_dir" "$rpm_sources/"
+    if [ -n "$pypdfium2_cfg_dir" ] && [ -d "$pypdfium2_cfg_dir" ]; then
+        cp -a "$pypdfium2_cfg_dir" "$rpm_sources/"
+    fi
+    find "$rpm_sources" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
+    cp "$PACKAGING_DIR/comic-scroll-reader" "$rpm_sources/"
     cp "$PACKAGING_DIR/comic-scroll-reader.desktop" "$rpm_sources/"
     cp "$PROJECT_ROOT/comic_scroll_reader/assets/csr_app_icon.png" "$rpm_sources/"
     cp "$PACKAGING_DIR/com.github.alef0.comic_scroll_reader.metainfo.xml" "$rpm_sources/"
@@ -185,6 +281,8 @@ build_rpm() {
     rpmbuild -bb \
         --define "_topdir $rpm_topdir" \
         --define "_sourcedir $rpm_sources" \
+        --define "_tmppath $rpm_topdir/tmp" \
+        --define "_dbpath $rpm_topdir/rpmdb" \
         "$rpm_topdir/SPECS/comic-scroll-reader.spec"
 
     local generated_rpm
@@ -237,6 +335,8 @@ build_mac() {
 # Parse Command Line Arguments
 DO_DEB=false
 DO_RPM=false
+DO_STANDALONE_DEB=false
+DO_STANDALONE_RPM=false
 DO_WIN=false
 DO_MAC=false
 
@@ -262,6 +362,12 @@ else
         case "$1" in
             --deb) DO_DEB=true; shift ;;
             --rpm) DO_RPM=true; shift ;;
+            --standalone-deb) DO_STANDALONE_DEB=true; shift ;;
+            --standalone-rpm) DO_STANDALONE_RPM=true; shift ;;
+            --standalone)
+                build_standalone_bundle
+                shift
+                ;;
             --windows|--win) DO_WIN=true; shift ;;
             --mac|--macos) DO_MAC=true; shift ;;
             --all)
@@ -283,8 +389,14 @@ mkdir -p "$DIST_DIR"
 if [ "$DO_DEB" = true ]; then
     build_deb
 fi
+if [ "$DO_STANDALONE_DEB" = true ]; then
+    build_deb_standalone
+fi
 if [ "$DO_RPM" = true ]; then
     build_rpm
+fi
+if [ "$DO_STANDALONE_RPM" = true ]; then
+    build_rpm_standalone || echo "Standalone RPM not configured."
 fi
 if [ "$DO_WIN" = true ]; then
     build_windows

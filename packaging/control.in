@@ -6,7 +6,7 @@ Architecture: @ARCH@
 Maintainer: Alef-0 <alefgabryel123@gmail.com>
 Homepage: https://github.com/Alef-0/Comic-Scroll-Qt-Reader
 Installed-Size: @INSTALLED_SIZE@
-Depends: libc6 (>= 2.34), libgl1, libx11-6, libxcb1, libxkbcommon0, zlib1g
+Depends: python3 (>= 3.10), python3-pyqt6
 Description: Fast continuous scroll and single-page reader for comics, manga, and PDFs
  Comic Scroll Reader is a modern desktop viewer designed specifically for
  reading comic folders, webtoons, manga, and PDF documents.

@@ -7,7 +7,7 @@ URL:            https://github.com/Alef-0/Comic-Scroll-Qt-Reader
 BuildArch:      x86_64
 
 AutoReqProv:    no
-Requires:       glibc, libglvnd-glx, libX11, libxcb, libxkbcommon
+Requires:       python3 >= 3.10, (python3-pyqt6 or python3-qt6)
 
 %description
 Comic Scroll Reader is a sleek, modern desktop viewer designed specifically
@@ -23,9 +23,17 @@ mkdir -p %{buildroot}/usr/share/pixmaps
 mkdir -p %{buildroot}/usr/share/metainfo
 mkdir -p %{buildroot}/usr/share/doc/%{name}
 
-# The build script populates %{buildroot} prior to rpmbuild -bb
-cp -a %{_sourcedir}/bundle/* %{buildroot}/usr/lib/comic-scroll-reader/
-ln -sf ../lib/comic-scroll-reader/comic-scroll-reader %{buildroot}/usr/bin/comic-scroll-reader
+# Copy application and vendored libraries
+cp -a %{_sourcedir}/comic_scroll_reader %{buildroot}/usr/lib/comic-scroll-reader/
+cp -a %{_sourcedir}/pypdfium2 %{buildroot}/usr/lib/comic-scroll-reader/
+cp -a %{_sourcedir}/pypdfium2_raw %{buildroot}/usr/lib/comic-scroll-reader/
+if [ -d %{_sourcedir}/pypdfium2_cfg ]; then
+    cp -a %{_sourcedir}/pypdfium2_cfg %{buildroot}/usr/lib/comic-scroll-reader/
+fi
+
+# Launcher script
+install -m 755 %{_sourcedir}/comic-scroll-reader %{buildroot}/usr/bin/comic-scroll-reader
+
 cp %{_sourcedir}/comic-scroll-reader.desktop %{buildroot}/usr/share/applications/
 cp %{_sourcedir}/csr_app_icon.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/comic-scroll-reader.png
 cp %{_sourcedir}/csr_app_icon.png %{buildroot}/usr/share/pixmaps/comic-scroll-reader.png
