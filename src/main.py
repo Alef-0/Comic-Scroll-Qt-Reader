@@ -17,11 +17,11 @@ else:
 def parse_arguments(args=None):
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Qt Scroll Reader - View images in a folder with keyboard/mouse navigation, zoom, and pan."
+        description="Qt Scroll Reader - View images or PDF documents in continuous scroll or single-page mode with keyboard/mouse navigation, zoom, and pan."
     )
     parser.add_argument(
         "image_path",
-        help="Path to an image file or directory containing images to open",
+        help="Path to an image file, PDF file, or directory containing images to open",
     )
     return parser.parse_args(args)
 

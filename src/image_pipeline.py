@@ -10,6 +10,19 @@ from typing import Hashable, Optional, Set
 from PyQt6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QImageReader
 
+try:
+    from src.pdf_handler import (
+        get_file_path_for_stat,
+        parse_pdf_page_uri,
+        render_pdf_page,
+    )
+except ImportError:
+    from pdf_handler import (
+        get_file_path_for_stat,
+        parse_pdf_page_uri,
+        render_pdf_page,
+    )
+
 
 MIB = 1024 * 1024
 
@@ -169,6 +182,21 @@ class _DecodeWorker(QRunnable):
         self.signals = _WorkerSignals()
 
     def run(self) -> None:
+        pdf_info = parse_pdf_page_uri(self.request.path)
+        if pdf_info is not None:
+            pdf_path, page_idx = pdf_info
+            image, source_size, error = render_pdf_page(
+                pdf_path, page_idx, bounds=self.request.bounds
+            )
+            try:
+                self.signals.finished.emit(
+                    self.worker_id,
+                    DecodeResult(self.request, image, QSize(source_size), error),
+                )
+            except RuntimeError:
+                pass
+            return
+
         reader = QImageReader(self.request.path)
         reader.setAutoTransform(True)
         source_size = reader.size()
@@ -227,8 +255,14 @@ class ImagePipeline(QObject):
         super().__init__(parent)
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(2)
+        # PDFium rendering is serialized by PdfDocumentHandler. Keeping PDF jobs
+        # on one reusable worker also prevents multiple thread-local allocator
+        # arenas from retaining a full-resolution source-page high-water mark.
+        self.pdf_pool = QThreadPool(self)
+        self.pdf_pool.setMaxThreadCount(1)
         self.preview_cache = ByteBoundedImageCache(self.PREVIEW_CACHE_BYTES)
         self._workers: dict[int, _DecodeWorker] = {}
+        self._worker_pools: dict[int, QThreadPool] = {}
         self._inflight_waiters: dict[tuple, list[DecodeRequest]] = {}
         self._worker_ids_by_cache_key: dict[tuple, int] = {}
         self._worker_priorities: dict[int, int] = {}
@@ -273,8 +307,10 @@ class ImagePipeline(QObject):
             # Leave an empty waiter list behind for a running decode. A later
             # request for the same pixels can then attach to that work safely.
             self._inflight_waiters[cache_key] = []
-            if self.pool.tryTake(worker):
+            worker_pool = self._worker_pools.get(worker_id, self.pool)
+            if worker_pool.tryTake(worker):
                 self._workers.pop(worker_id, None)
+                self._worker_pools.pop(worker_id, None)
                 self._inflight_waiters.pop(cache_key, None)
                 self._worker_ids_by_cache_key.pop(cache_key, None)
                 self._worker_priorities.pop(worker_id, None)
@@ -283,14 +319,14 @@ class ImagePipeline(QObject):
         self, path: str, bounds: QSize, priority: int
     ) -> bool:
         """Raise a matching queued preview's priority when it becomes visible."""
-        absolute_path = os.path.abspath(path)
+        stat_path = get_file_path_for_stat(path)
         try:
-            stat_result = os.stat(absolute_path)
+            stat_result = os.stat(stat_path)
         except OSError:
             return False
 
         cache_key = (
-            absolute_path,
+            path,
             (stat_result.st_mtime_ns, stat_result.st_size),
             (bounds.width(), bounds.height()),
         )
@@ -308,15 +344,16 @@ class ImagePipeline(QObject):
             return True
 
         worker = self._workers.get(worker_id)
-        if worker is None or not self.pool.tryTake(worker):
+        worker_pool = self._worker_pools.get(worker_id, self.pool)
+        if worker is None or not worker_pool.tryTake(worker):
             return False
 
         self._worker_priorities[worker_id] = priority
-        self.pool.start(worker, priority)
+        worker_pool.start(worker, priority)
         return True
 
     def retain_preview_paths(self, paths: set[str]) -> None:
-        self.preview_cache.retain_paths({os.path.abspath(path) for path in paths})
+        self.preview_cache.retain_paths(set(paths))
 
     def _safe_emit_failed(self, result: DecodeResult) -> None:
         try:
@@ -338,29 +375,29 @@ class ImagePipeline(QObject):
         purpose: str,
         priority: int,
     ) -> None:
-        absolute_path = os.path.abspath(path)
+        stat_path = get_file_path_for_stat(path)
         try:
-            stat_result = os.stat(absolute_path)
+            stat_result = os.stat(stat_path)
             signature = (stat_result.st_mtime_ns, stat_result.st_size)
         except OSError as error:
             request = DecodeRequest(
-                request_id, absolute_path, purpose, bounds, (absolute_path,)
+                request_id, path, purpose, bounds, (path,)
             )
             result = DecodeResult(request, QImage(), QSize(), str(error))
             QTimer.singleShot(0, lambda result=result: self._safe_emit_failed(result))
             return
 
         size_key = None if bounds is None else (bounds.width(), bounds.height())
-        cache_key = (absolute_path, signature, size_key)
+        cache_key = (path, signature, size_key)
         request = DecodeRequest(
-            request_id, absolute_path, purpose, bounds, cache_key
+            request_id, path, purpose, bounds, cache_key
         )
 
         if bounds is not None:
             cached = self.preview_cache.get(cache_key)
             if cached is None:
                 cached = self.preview_cache.get_covering_preview(
-                    absolute_path, signature, bounds
+                    path, signature, bounds
                 )
             if cached is not None:
                 result = DecodeResult(
@@ -381,17 +418,22 @@ class ImagePipeline(QObject):
         self._next_worker_id += 1
         worker_id = self._next_worker_id
         worker = _DecodeWorker(worker_id, request)
+        worker_pool = (
+            self.pdf_pool if parse_pdf_page_uri(path) is not None else self.pool
+        )
         self._workers[worker_id] = worker
+        self._worker_pools[worker_id] = worker_pool
         self._inflight_waiters[cache_key] = [request]
         self._worker_ids_by_cache_key[cache_key] = worker_id
         self._worker_priorities[worker_id] = priority
         worker.signals.finished.connect(
             self._on_finished, Qt.ConnectionType.QueuedConnection
         )
-        self.pool.start(worker, priority)
+        worker_pool.start(worker, priority)
 
     def _on_finished(self, worker_id: int, result: DecodeResult) -> None:
         self._workers.pop(worker_id, None)
+        self._worker_pools.pop(worker_id, None)
         self._worker_ids_by_cache_key.pop(result.request.cache_key, None)
         self._worker_priorities.pop(worker_id, None)
         waiting_requests = self._inflight_waiters.pop(

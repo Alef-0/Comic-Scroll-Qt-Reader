@@ -26,6 +26,13 @@ try:
         MouseEventHandler,
     )
     from src.image_pipeline import DecodeResult, ImagePipeline
+    from src.pdf_handler import (
+        build_pdf_page_uri,
+        close_pdf_handler,
+        get_pdf_handler,
+        is_pdf_file,
+        parse_pdf_page_uri,
+    )
     from src.scroll_reader import ScrollReaderWidget
     from src.single_viewer import ImageViewerWidget, ScaledImageLabel
 except ImportError:
@@ -35,6 +42,13 @@ except ImportError:
         MouseEventHandler,
     )
     from image_pipeline import DecodeResult, ImagePipeline
+    from pdf_handler import (
+        build_pdf_page_uri,
+        close_pdf_handler,
+        get_pdf_handler,
+        is_pdf_file,
+        parse_pdf_page_uri,
+    )
     from scroll_reader import ScrollReaderWidget
     from single_viewer import ImageViewerWidget, ScaledImageLabel
 
@@ -160,8 +174,9 @@ class MainWindow(QMainWindow):
             on_toggle_mode=self.toggle_mode,
         )
 
-        # Image folder discovery state
+        # Image folder discovery / PDF state
         self.folder_path: Optional[str] = None
+        self.pdf_path: Optional[str] = None
         self.image_list: List[str] = []
         self.current_index: int = -1
         self._requested_index: Optional[int] = None
@@ -172,11 +187,7 @@ class MainWindow(QMainWindow):
 
         initial_path = target_path or image_path
         if initial_path:
-            resolved = os.path.abspath(initial_path)
-            if os.path.isdir(resolved):
-                self.discover_images(resolved)
-            else:
-                self.discover_images(os.path.dirname(resolved), initial_file=resolved)
+            self.load_image(initial_path)
 
     def set_mode(self, mode: ViewerMode) -> None:
         """Switch between Single Image mode and Scroll Reader mode, synchronizing current image."""
@@ -244,6 +255,10 @@ class MainWindow(QMainWindow):
         self, folder_path: str, initial_file: Optional[str] = None
     ) -> bool:
         """Scan a folder for supported images, sort them alphabetically, and open the target."""
+        if self.pdf_path:
+            close_pdf_handler(self.pdf_path)
+            self.pdf_path = None
+
         self.folder_path = os.path.abspath(folder_path)
         discovered = []
 
@@ -288,12 +303,56 @@ class MainWindow(QMainWindow):
             self.update_title()
             return False
 
+    def open_pdf(self, pdf_path: str, start_page: int = 0) -> bool:
+        """Open a PDF document, acquire all page URIs and sizes, and display in scroll mode by default."""
+        resolved = os.path.abspath(pdf_path)
+        if not is_pdf_file(resolved):
+            return False
+
+        if self.pdf_path and self.pdf_path != resolved:
+            close_pdf_handler(self.pdf_path)
+
+        try:
+            handler = get_pdf_handler(resolved)
+        except Exception as e:
+            self._show_load_error(resolved, f"Could not open PDF:\n{e}")
+            return False
+
+        if handler.page_count <= 0:
+            self.image_viewer.clear()
+            self.scroll_reader.clear()
+            self.update_title()
+            return False
+
+        self.pdf_path = resolved
+        self.folder_path = os.path.dirname(resolved)
+        self.image_list = [
+            build_pdf_page_uri(resolved, i) for i in range(handler.page_count)
+        ]
+
+        # PDF documents open by default on scroll mode
+        self.viewer_mode = ViewerMode.SCROLL
+        self._stack.setCurrentWidget(self.scroll_reader)
+
+        requested_index = max(0, min(start_page, len(self.image_list) - 1))
+        self.current_index = -1
+        self._requested_index = None
+
+        self.scroll_reader.set_images(self.image_list, start_index=requested_index)
+        return self._request_index(requested_index, force=True)
+
     def load_image(self, image_path: str) -> bool:
-        """Load an image file and discover its folder images."""
+        """Load an image file, PDF document, or discover folder images."""
         resolved = os.path.abspath(image_path)
+        if is_pdf_file(resolved):
+            return self.open_pdf(resolved)
         if os.path.isdir(resolved):
             return self.discover_images(resolved)
         return self.discover_images(os.path.dirname(resolved), initial_file=resolved)
+
+    def open_path(self, target_path: str) -> bool:
+        """Open an image file, PDF file, or directory."""
+        return self.load_image(target_path)
 
     def load_current_image(self) -> bool:
         """Asynchronously reload the selected or currently displayed image."""
@@ -309,6 +368,14 @@ class MainWindow(QMainWindow):
             return False
         return self._request_index(index, force=True)
 
+    def _display_name(self, path: str) -> str:
+        """Format filename for title display, distinguishing PDF pages."""
+        pdf_info = parse_pdf_page_uri(path)
+        if pdf_info is not None:
+            pdf_file, page_idx = pdf_info
+            return f"{os.path.basename(pdf_file)} (Page {page_idx + 1})"
+        return os.path.basename(path)
+
     def update_title(self):
         """Update window title with [X/Total] counter, filename, dimensions, and zoom."""
         if not self.image_list:
@@ -319,7 +386,7 @@ class MainWindow(QMainWindow):
 
         if self._requested_index is not None:
             path = self.image_list[self._requested_index]
-            filename = os.path.basename(path)
+            filename = self._display_name(path)
             self.setWindowTitle(
                 f"Qt Scroll Reader{mode_tag} - [{self._requested_index + 1}/{len(self.image_list)}] "
                 f"Loading {filename}…"
@@ -331,8 +398,12 @@ class MainWindow(QMainWindow):
             return
 
         path = self.image_list[self.current_index]
-        filename = os.path.basename(path)
-        source_size = self.image_viewer.source_size
+        filename = self._display_name(path)
+        source_size = (
+            self.scroll_reader._get_source_size(path)
+            if self.viewer_mode == ViewerMode.SCROLL
+            else self.image_viewer.source_size
+        )
         dim_str = (
             f" ({source_size.width()}x{source_size.height()})"
             if source_size.isValid()
@@ -561,3 +632,10 @@ class MainWindow(QMainWindow):
                 self.scroll_reader.keyPressEvent(event)
             else:
                 super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        """Clean up resources on window close."""
+        if self.pdf_path:
+            close_pdf_handler(self.pdf_path)
+            self.pdf_path = None
+        super().closeEvent(event)

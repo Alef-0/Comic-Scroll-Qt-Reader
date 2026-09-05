@@ -20,9 +20,11 @@ from PyQt6.QtWidgets import QAbstractScrollArea
 try:
     from src.controls.events import CommonViewerControls
     from src.image_pipeline import MIB, DecodeResult, ImagePipeline
+    from src.pdf_handler import get_pdf_page_size, parse_pdf_page_uri
 except ImportError:
     from controls.events import CommonViewerControls
     from image_pipeline import MIB, DecodeResult, ImagePipeline
+    from pdf_handler import get_pdf_page_size, parse_pdf_page_uri
 
 
 class ScrollReaderWidget(QAbstractScrollArea):
@@ -264,9 +266,20 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self.set_zoom(1.0)
 
     def _get_source_size(self, path: str) -> QSize:
-        """Query and cache native dimensions of image via header metadata."""
+        """Query and cache native dimensions of image via header metadata or PDF handler."""
         if path in self._image_sizes:
             return self._image_sizes[path]
+
+        pdf_info = parse_pdf_page_uri(path)
+        if pdf_info is not None:
+            pdf_path, page_idx = pdf_info
+            try:
+                size = get_pdf_page_size(pdf_path, page_idx)
+                if size.isValid() and size.width() > 0 and size.height() > 0:
+                    self._image_sizes[path] = size
+                    return size
+            except Exception:
+                pass
 
         reader = QImageReader(path)
         reader.setAutoTransform(True)
