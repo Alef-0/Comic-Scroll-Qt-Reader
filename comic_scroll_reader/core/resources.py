@@ -4,4 +4,4 @@ from pathlib import Path
 
 
 APP_NAME = "Comic Scroll Reader"
-APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "csr_app_icon.png"
+APP_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "csr_app_icon.png"

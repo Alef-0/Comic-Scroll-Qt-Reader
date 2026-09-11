@@ -14,8 +14,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QWidget
 
-from .input_controls import CommonViewerControls, MouseEventHandler
-from .pdf_handler import parse_pdf_page_uri
+from ..controls.input_controls import CommonViewerControls, MouseEventHandler
+from ..media.pdf_handler import parse_pdf_page_uri
 
 
 logger = logging.getLogger(__name__)

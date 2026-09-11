@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .resources import APP_ICON_PATH, APP_NAME
+from ..core.resources import APP_ICON_PATH, APP_NAME
 
 
 class WelcomeWidget(QWidget):

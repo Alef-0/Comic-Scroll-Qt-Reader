@@ -22,8 +22,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QImage, QImageReader
 
-from .archive_handler import decode_archive_page, parse_archive_page_uri
-from .pdf_handler import (
+from ..media.archive_handler import decode_archive_page, parse_archive_page_uri
+from ..media.pdf_handler import (
     get_file_path_for_stat,
     parse_pdf_page_uri,
     render_pdf_page,

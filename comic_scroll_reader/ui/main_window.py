@@ -1,11 +1,9 @@
 """Main application window for Comic Scroll Reader."""
 
 import os
-import re
 import sys
 from typing import List, Optional, Set
 
-from enum import Enum
 from PyQt6.QtWidgets import (
     QFileDialog,
     QInputDialog,
@@ -32,73 +30,40 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import QEvent, Qt, QSize, QTimer, pyqtSignal
 
-from .about_dialog import AboutDialog
-from .archive_handler import (
+from ..controls.input_controls import (
+    CommonViewerControls,
+    KeyboardEventHandler,
+    MouseEventHandler,
+)
+from ..core.models import (
+    ComicMode,
+    SUPPORTED_EXTENSIONS,
+    ViewerMode,
+    natural_sort_key,
+)
+from ..core.resources import APP_ICON_PATH, APP_NAME
+from ..core.settings import load_state, save_state
+from ..imaging.image_pipeline import DecodeResult, ImagePipeline
+from ..media.archive_handler import (
     build_archive_page_uri,
     close_archive_handler,
     get_archive_handler,
     is_comic_archive_file,
     parse_archive_page_uri,
 )
-from .hud_overlay import ViewerHud
-from .image_pipeline import DecodeResult, ImagePipeline
-from .input_controls import (
-    CommonViewerControls,
-    KeyboardEventHandler,
-    MouseEventHandler,
-)
-from .pdf_handler import (
+from ..media.pdf_handler import (
     build_pdf_page_uri,
     close_pdf_handler,
     get_pdf_handler,
     is_pdf_file,
     parse_pdf_page_uri,
 )
-from .resources import APP_ICON_PATH, APP_NAME
-from .scroll_reader import ScrollReaderWidget
-from .settings import load_state, save_state
+from ..rendering.scroll_reader import ScrollReaderWidget
+from ..rendering.single_viewer import ImageViewerWidget, ScaledImageLabel
+from .about_dialog import AboutDialog
+from .hud_overlay import ViewerHud
 from .shortcuts_dialog import ShortcutsDialog
-from .single_viewer import ImageViewerWidget, ScaledImageLabel
 from .welcome_widget import WelcomeWidget
-
-
-
-class ViewerMode(Enum):
-    SINGLE = "single"
-    SCROLL = "scroll"
-
-
-class ComicMode(Enum):
-    DEFAULT = "default"
-    COMICS = "comics"
-    MANGA = "manga"
-    WEBTOON = "webtoon"
-    CUSTOM = "custom"
-
-SUPPORTED_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".bmp",
-    ".webp",
-    ".gif",
-    ".tif",
-    ".tiff",
-    ".jfif",
-    ".ico",
-    ".svg",
-    ".tga",
-}
-
-
-def natural_sort_key(file_path: str) -> list:
-    """Sort strings containing numbers in human/natural alphabetical order."""
-    filename = os.path.basename(file_path)
-    return [
-        int(token) if token.isdigit() else token.casefold()
-        for token in re.split(r"(\d+)", filename)
-    ]
-
 
 
 __all__ = [

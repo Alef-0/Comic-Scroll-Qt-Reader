@@ -16,14 +16,14 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QSize, QRect, QPoint, QPointF, QEventLoop, QTimer
 
-from comic_scroll_reader.main_window import (
+from comic_scroll_reader.ui.main_window import (
     ImageViewerWidget,
     ScaledImageLabel,
     MainWindow,
     ViewerMode,
     natural_sort_key,
 )
-from comic_scroll_reader.image_pipeline import (
+from comic_scroll_reader.imaging.image_pipeline import (
     ByteBoundedImageCache,
     CachedImage,
     DecodeRequest,
@@ -976,7 +976,7 @@ class TestSpreadSingleViewer(unittest.TestCase):
         viewer.deleteLater()
 
     def test_single_mode_spread_navigation_and_titles(self):
-        from comic_scroll_reader.main_window import ComicMode
+        from comic_scroll_reader.core.models import ComicMode
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
         window.set_comic_mode(ComicMode.COMICS)
@@ -1028,7 +1028,7 @@ class TestSpreadSingleViewer(unittest.TestCase):
         img_wide.save(wide_path)
 
         window = MainWindow(target_path=self.temp_dir)
-        from comic_scroll_reader.main_window import ComicMode
+        from comic_scroll_reader.core.models import ComicMode
         window.set_comic_mode(ComicMode.COMICS)
 
         spread_indices = window._double_spread_indices()

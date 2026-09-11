@@ -48,7 +48,7 @@ Powered by **Python 3**, **PyQt6**, and **Google PDFium**, it combines instant s
     Every preview is letterboxed to preserve the complete page at any aspect ratio.
   - Choose the thumbnail layout from **Navigate → Thumbnail Layout**, and place
     the HUD at the top or bottom from the View menu.
-  - Use the HUD's **Aa** quick control to resize the HUD and its text.
+  - Use the inline HUD-size slider to resize the HUD and its text with a live preview.
   - Fades out automatically to keep your screen distraction-free (press `H` to toggle).
 - ✏️ **Non-destructive Page Edits**:
   - Rotate, mirror, flip, or reset the current page from the **Edit** menu.
@@ -118,6 +118,22 @@ If you prefer running directly in Python:
    # Or directly with Python:
    python3 -m comic_scroll_reader
    ```
+
+---
+
+## 🧭 Source Layout
+
+The `comic_scroll_reader` package is grouped by responsibility:
+
+- `ui/` — main window, HUD, dialogs, and welcome screen.
+- `rendering/` — single-page and continuous-scroll drawing surfaces.
+- `media/` — PDF and CBZ/CBR document acquisition.
+- `imaging/` — asynchronous image decoding, processing, and caching.
+- `controls/` — shared keyboard and mouse input handling.
+- `core/` — reader modes, settings, resource paths, and shared helpers.
+- `assets/` — application icons and other bundled static files.
+
+The package root contains only the application entry point and package metadata.
 
 ---
 

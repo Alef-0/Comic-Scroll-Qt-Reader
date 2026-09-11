@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .resources import APP_NAME
+from ..core.resources import APP_NAME
 
 
 class ShortcutsDialog(QDialog):

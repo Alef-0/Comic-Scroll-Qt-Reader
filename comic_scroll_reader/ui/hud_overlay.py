@@ -4,6 +4,7 @@ from typing import Optional
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QPoint,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -24,9 +25,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSlider,
     QToolButton,
-    QVBoxLayout,
     QWidget,
-    QWidgetAction,
 )
 
 
@@ -96,6 +95,7 @@ class ViewerHud(QWidget):
         self._at_top = False
         self._thumbnail_layout = "vertical"
         self._hud_scale_percent = 100
+        self._is_adjusting_hud_scale = False
         self._page_count = 0
         self._current_thumbnail_index = -1
         self._thumbnail_items_populated = False
@@ -162,6 +162,22 @@ class ViewerHud(QWidget):
             "QLabel {"
             "  color: #888888;"
             "  font-size: 13px;"
+            "}"
+            "QSlider::groove:horizontal {"
+            "  height: 4px;"
+            "  background: #555b66;"
+            "  border-radius: 2px;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            "  background: #8ab4f8;"
+            "  border-radius: 2px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            "  width: 12px;"
+            "  margin: -4px 0;"
+            "  background: #e0e0e0;"
+            "  border: 1px solid #8ab4f8;"
+            "  border-radius: 6px;"
             "}"
         )
 
@@ -260,31 +276,25 @@ class ViewerHud(QWidget):
 
         pill_layout.addWidget(self._make_separator())
 
-        self.btn_hud_size = QToolButton(self.pill)
-        self.btn_hud_size.setText("Aa")
-        self.btn_hud_size.setToolTip("Adjust HUD and text size")
-        self.btn_hud_size.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_hud_size.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._hud_size_menu = QMenu(self.btn_hud_size)
-        size_widget = QWidget(self._hud_size_menu)
-        size_layout = QVBoxLayout(size_widget)
-        size_layout.setContentsMargins(12, 10, 12, 10)
-        size_layout.setSpacing(6)
-        self._hud_size_label = QLabel("HUD and text: 100%", size_widget)
-        self._hud_size_slider = QSlider(Qt.Orientation.Horizontal, size_widget)
+        self._hud_size_label = QLabel("HUD: 100%", self.pill)
+        self._hud_size_label.setToolTip("HUD and text size")
+        pill_layout.addWidget(self._hud_size_label)
+        self._hud_size_slider = QSlider(Qt.Orientation.Horizontal, self.pill)
+        self._hud_size_slider.setToolTip("Adjust HUD and text size")
+        self._hud_size_slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hud_size_slider.setRange(75, 150)
         self._hud_size_slider.setSingleStep(5)
         self._hud_size_slider.setPageStep(10)
         self._hud_size_slider.setValue(100)
-        self._hud_size_slider.setMinimumWidth(180)
+        self._hud_size_slider.setFixedWidth(110)
         self._hud_size_slider.valueChanged.connect(self._on_hud_scale_changed)
-        size_layout.addWidget(self._hud_size_label)
-        size_layout.addWidget(self._hud_size_slider)
-        size_action = QWidgetAction(self._hud_size_menu)
-        size_action.setDefaultWidget(size_widget)
-        self._hud_size_menu.addAction(size_action)
-        self.btn_hud_size.setMenu(self._hud_size_menu)
-        pill_layout.addWidget(self.btn_hud_size)
+        self._hud_size_slider.sliderPressed.connect(
+            self._begin_hud_scale_adjustment
+        )
+        self._hud_size_slider.sliderReleased.connect(
+            self._end_hud_scale_adjustment
+        )
+        pill_layout.addWidget(self._hud_size_slider)
 
         pill_layout.addWidget(self._make_separator())
 
@@ -500,9 +510,29 @@ class ViewerHud(QWidget):
         return self._hud_scale_percent
 
     def _on_hud_scale_changed(self, percent: int) -> None:
+        slider_anchor = None
+        if self._is_adjusting_hud_scale:
+            slider_anchor = self._hud_size_slider.mapToGlobal(QPoint(0, 0))
         self._hud_scale_percent = percent
         self._apply_hud_scale()
+        if slider_anchor is not None:
+            current_anchor = self._hud_size_slider.mapToGlobal(QPoint(0, 0))
+            offset = slider_anchor - current_anchor
+            self.move(self.x() + offset.x(), self.y() + offset.y())
         self.hud_scale_changed.emit(percent)
+
+    def _begin_hud_scale_adjustment(self) -> None:
+        """Keep the HUD visible while its inline size slider is dragged."""
+        self._is_adjusting_hud_scale = True
+        self._hide_timer.stop()
+
+    def _end_hud_scale_adjustment(self) -> None:
+        self._is_adjusting_hud_scale = False
+        parent = self.parentWidget()
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
+        if not self._is_mouse_inside and not self._is_pointer_in_activation_band:
+            self._hide_timer.start()
 
     def _apply_hud_scale(self) -> None:
         scale = self._hud_scale_percent / 100.0
@@ -536,6 +566,16 @@ class ViewerHud(QWidget):
             "}"
             "QPushButton:disabled, QToolButton:disabled { color: #555555; }"
             f"QLabel {{ color: #888888; font-size: {font_size}px; }}"
+            "QSlider::groove:horizontal {"
+            "  height: 4px; background: #555b66; border-radius: 2px;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            "  background: #8ab4f8; border-radius: 2px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            "  width: 12px; margin: -4px 0; background: #e0e0e0;"
+            "  border: 1px solid #8ab4f8; border-radius: 6px;"
+            "}"
         )
         pill_layout = self.pill.layout()
         if pill_layout is not None:
@@ -551,7 +591,7 @@ class ViewerHud(QWidget):
             f"padding: {vertical_padding}px {max(7, int(round(10 * scale)))}px; "
             "color: #ffffff;"
         )
-        self._hud_size_label.setText(f"HUD and text: {self._hud_scale_percent}%")
+        self._hud_size_label.setText(f"HUD: {self._hud_scale_percent}%")
         self._refresh_layout_geometry()
         parent = self.parentWidget()
         if parent is not None:
@@ -887,7 +927,7 @@ class ViewerHud(QWidget):
 
     def leaveEvent(self, event):
         self._is_mouse_inside = False
-        if not self.isHidden():
+        if not self.isHidden() and not self._is_adjusting_hud_scale:
             self._hide_timer.start()
         super().leaveEvent(event)
 
@@ -895,6 +935,7 @@ class ViewerHud(QWidget):
         if (
             not self._is_mouse_inside
             and not self._is_pointer_in_activation_band
+            and not self._is_adjusting_hud_scale
         ):
             self._fade_out()
 
@@ -924,3 +965,6 @@ class ViewerHud(QWidget):
             self.thumbnail_list.hide()
             self.hide()
             self._opacity_effect.setOpacity(1.0)
+            parent = self.parentWidget()
+            if parent is not None:
+                self.reposition(parent.width(), parent.height())

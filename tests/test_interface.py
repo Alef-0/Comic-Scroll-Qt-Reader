@@ -5,17 +5,18 @@ import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
-from PyQt6.QtCore import QMimeData, QPointF, QSize, Qt, QUrl, QEvent
+from PyQt6.QtCore import QEvent, QMimeData, QPoint, QPointF, QSize, Qt, QUrl
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QKeyEvent
-from PyQt6.QtWidgets import QApplication, QFileDialog, QLabel
+from PyQt6.QtWidgets import QApplication, QFileDialog, QLabel, QWidget
 
 from comic_scroll_reader.__main__ import is_desktop_file_installed, parse_arguments
-from comic_scroll_reader.about_dialog import AboutDialog
-from comic_scroll_reader.hud_overlay import ViewerHud
-from comic_scroll_reader.image_pipeline import DecodeRequest, DecodeResult
-from comic_scroll_reader.main_window import ComicMode, MainWindow, ViewerMode
-from comic_scroll_reader.shortcuts_dialog import ShortcutsDialog
-from comic_scroll_reader.welcome_widget import WelcomeWidget
+from comic_scroll_reader.core.models import ComicMode, ViewerMode
+from comic_scroll_reader.imaging.image_pipeline import DecodeRequest, DecodeResult
+from comic_scroll_reader.ui.about_dialog import AboutDialog
+from comic_scroll_reader.ui.hud_overlay import ViewerHud
+from comic_scroll_reader.ui.main_window import MainWindow
+from comic_scroll_reader.ui.shortcuts_dialog import ShortcutsDialog
+from comic_scroll_reader.ui.welcome_widget import WelcomeWidget
 
 app = QApplication.instance()
 if app is None:
@@ -321,12 +322,41 @@ class TestViewerHud(unittest.TestCase):
         self.hud.hud_scale_changed.connect(changed.append)
         original_height = self.hud.sizeHint().height()
 
+        self.assertIs(self.hud._hud_size_slider.parentWidget(), self.hud.pill)
         self.hud._hud_size_slider.setValue(135)
 
         self.assertEqual(self.hud.hud_scale(), 135)
         self.assertEqual(changed, [135])
         self.assertIn("135%", self.hud._hud_size_label.text())
         self.assertGreater(self.hud.sizeHint().height(), original_height)
+
+    def test_hud_size_slider_holds_auto_hide_during_drag(self):
+        parent = QWidget()
+        parent.resize(1280, 720)
+        self.hud.setParent(parent)
+        self.hud.reposition(parent.width(), parent.height())
+        self.hud._is_mouse_inside = False
+        self.hud._is_pointer_in_activation_band = False
+        self.hud._fade_target_visible = True
+
+        self.hud._hud_size_slider.sliderPressed.emit()
+        slider_anchor = self.hud._hud_size_slider.mapToGlobal(QPoint(0, 0))
+        self.hud._hud_size_slider.setValue(140)
+        self.hud._auto_hide()
+
+        self.assertTrue(self.hud._is_adjusting_hud_scale)
+        self.assertTrue(self.hud._fade_target_visible)
+        self.assertEqual(
+            self.hud._hud_size_slider.mapToGlobal(QPoint(0, 0)),
+            slider_anchor,
+        )
+
+        self.hud._hud_size_slider.sliderReleased.emit()
+        self.assertFalse(self.hud._is_adjusting_hud_scale)
+        self.assertEqual(self.hud.x(), (parent.width() - self.hud.width()) // 2)
+        self.assertTrue(self.hud._hide_timer.isActive())
+        self.hud.setParent(None)
+        parent.deleteLater()
 
     def test_hud_button_signals(self):
         signals = []

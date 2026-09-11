@@ -5,7 +5,7 @@ from PyQt6.QtCore import Qt, QPointF, QPoint
 from PyQt6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
-from comic_scroll_reader.input_controls import (
+from comic_scroll_reader.controls.input_controls import (
     CommonViewerControls,
     KeyboardEventHandler,
     MouseEventHandler,

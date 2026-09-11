@@ -19,10 +19,10 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QAbstractScrollArea
 
-from .archive_handler import get_archive_page_size, parse_archive_page_uri
-from .image_pipeline import MIB, DecodeResult, ImagePipeline
-from .input_controls import CommonViewerControls
-from .pdf_handler import get_pdf_page_size, parse_pdf_page_uri
+from ..controls.input_controls import CommonViewerControls
+from ..imaging.image_pipeline import MIB, DecodeResult, ImagePipeline
+from ..media.archive_handler import get_archive_page_size, parse_archive_page_uri
+from ..media.pdf_handler import get_pdf_page_size, parse_pdf_page_uri
 
 
 logger = logging.getLogger(__name__)

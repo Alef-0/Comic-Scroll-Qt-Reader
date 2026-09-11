@@ -12,11 +12,11 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 if __package__:
-    from .main_window import MainWindow
-    from .resources import APP_ICON_PATH, APP_NAME
+    from .core.resources import APP_ICON_PATH, APP_NAME
+    from .ui.main_window import MainWindow
 else:
-    from comic_scroll_reader.main_window import MainWindow
-    from comic_scroll_reader.resources import APP_ICON_PATH, APP_NAME
+    from comic_scroll_reader.core.resources import APP_ICON_PATH, APP_NAME
+    from comic_scroll_reader.ui.main_window import MainWindow
 
 
 def parse_arguments(args=None):

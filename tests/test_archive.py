@@ -12,8 +12,8 @@ from PyQt6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QSize, QTim
 from PyQt6.QtGui import QColor, QImage, QPixmap
 from PyQt6.QtWidgets import QApplication
 
-import comic_scroll_reader.archive_handler as archive_handler_module
-from comic_scroll_reader.archive_handler import (
+import comic_scroll_reader.media.archive_handler as archive_handler_module
+from comic_scroll_reader.media.archive_handler import (
     ComicArchiveHandler,
     build_archive_page_uri,
     close_all_archive_handlers,
@@ -22,9 +22,10 @@ from comic_scroll_reader.archive_handler import (
     is_comic_archive_file,
     parse_archive_page_uri,
 )
-from comic_scroll_reader.image_pipeline import DecodeResult, ImagePipeline
-from comic_scroll_reader.main_window import MainWindow, ViewerMode
-from comic_scroll_reader.single_viewer import ImageViewerWidget
+from comic_scroll_reader.imaging.image_pipeline import DecodeResult, ImagePipeline
+from comic_scroll_reader.core.models import ViewerMode
+from comic_scroll_reader.rendering.single_viewer import ImageViewerWidget
+from comic_scroll_reader.ui.main_window import MainWindow
 
 
 @pytest.fixture(scope="session")
@@ -99,7 +100,9 @@ def test_image_pipeline_decodes_archive_page(
     sample_cbz: str,
     caplog: pytest.LogCaptureFixture,
 ):
-    caplog.set_level(logging.DEBUG, logger="comic_scroll_reader.image_pipeline")
+    caplog.set_level(
+        logging.DEBUG, logger="comic_scroll_reader.imaging.image_pipeline"
+    )
     pipeline = ImagePipeline()
     uri = build_archive_page_uri(sample_cbz, 1)
     loop = QEventLoop()
@@ -197,7 +200,9 @@ def test_missing_cbr_dependency_has_actionable_error(monkeypatch: pytest.MonkeyP
 
 
 def test_sharpening_emits_debug_message(qapp: QApplication, caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="comic_scroll_reader.single_viewer")
+    caplog.set_level(
+        logging.DEBUG, logger="comic_scroll_reader.rendering.single_viewer"
+    )
     viewer = ImageViewerWidget()
     viewer.set_preview_pixmap(QPixmap(40, 40), QSize(80, 80), "/tmp/page.png")
     viewer.set_refined_preview_pixmap(QPixmap(80, 80), "/tmp/page.png")

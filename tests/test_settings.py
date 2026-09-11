@@ -7,8 +7,9 @@ import pytest
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QApplication
 
-from comic_scroll_reader.main_window import ComicMode, MainWindow, ViewerMode
-from comic_scroll_reader.settings import load_state, save_state, state_file_path
+from comic_scroll_reader.core.models import ComicMode, ViewerMode
+from comic_scroll_reader.core.settings import load_state, save_state, state_file_path
+from comic_scroll_reader.ui.main_window import MainWindow
 
 
 @pytest.fixture(scope="session")

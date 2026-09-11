@@ -12,11 +12,11 @@ from PyQt6.QtCore import QEventLoop, QSize, Qt, QTimer
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QApplication
 
-import comic_scroll_reader.pdf_handler as pdf_handler_module
-import comic_scroll_reader.image_pipeline as image_pipeline_module
+import comic_scroll_reader.imaging.image_pipeline as image_pipeline_module
+import comic_scroll_reader.media.pdf_handler as pdf_handler_module
 from comic_scroll_reader.__main__ import parse_arguments
-from comic_scroll_reader.image_pipeline import DecodeResult, ImagePipeline
-from comic_scroll_reader.pdf_handler import (
+from comic_scroll_reader.imaging.image_pipeline import DecodeResult, ImagePipeline
+from comic_scroll_reader.media.pdf_handler import (
     PdfDocumentHandler,
     build_pdf_page_uri,
     close_all_pdf_handlers,
@@ -28,8 +28,9 @@ from comic_scroll_reader.pdf_handler import (
     parse_pdf_page_uri,
     render_pdf_page,
 )
-from comic_scroll_reader.main_window import MainWindow, ViewerMode
-from comic_scroll_reader.scroll_reader import ScrollReaderWidget
+from comic_scroll_reader.core.models import ViewerMode
+from comic_scroll_reader.rendering.scroll_reader import ScrollReaderWidget
+from comic_scroll_reader.ui.main_window import MainWindow
 
 
 @pytest.fixture(scope="session")
