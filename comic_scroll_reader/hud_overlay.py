@@ -5,26 +5,52 @@ from typing import Optional
 from PyQt6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
+    QSize,
     Qt,
     QTimer,
     pyqtSignal,
 )
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
+    QLabel,
+    QListView,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QPushButton,
+    QSlider,
     QToolButton,
+    QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 
+class ThumbnailListWidget(QListWidget):
+    """Thumbnail list that keeps the companion HUD open while hovered."""
+
+    pointer_entered = pyqtSignal()
+    pointer_left = pyqtSignal()
+
+    def enterEvent(self, event):
+        self.pointer_entered.emit()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.pointer_left.emit()
+        super().leaveEvent(event)
+
+
 class ViewerHud(QWidget):
-    """Floating HUD overlay positioned at the bottom of the viewer window.
+    """Floating HUD overlay positioned at either edge of the viewer window.
 
     Provides quick visual access to page navigation, mode switching, zoom levels,
-    and fullscreen toggle, with auto-hiding after inactivity.
+    fullscreen, and an optional lazy thumbnail strip, with auto-hiding after
+    inactivity.
     """
 
     prev_clicked = pyqtSignal()
@@ -36,10 +62,23 @@ class ViewerHud(QWidget):
     zoom_reset_clicked = pyqtSignal()
     fullscreen_toggled = pyqtSignal()
     comic_mode_selected = pyqtSignal(str)
+    thumbnails_toggled = pyqtSignal(bool)
+    thumbnail_requested = pyqtSignal(int)
+    thumbnail_clicked = pyqtSignal(int)
+    hud_scale_changed = pyqtSignal(int)
 
     HIDE_DELAY_MS = 900
     FADE_DURATION_MS = 350
     ACTIVATION_MARGIN = 28
+    EDGE_MARGIN = 24
+    THUMBNAIL_STRIP_WIDTH = 880
+    THUMBNAIL_FILMSTRIP_HEIGHT = 206
+    THUMBNAIL_SIDEBAR_WIDTH = 174
+    THUMBNAIL_DECODE_SIZE = QSize(220, 240)
+    THUMBNAIL_ICON_SIZE = QSize(140, 184)
+    THUMBNAIL_GRID_SIZE = QSize(154, 198)
+    VERTICAL_VISIBLE_COUNT = 5
+    HORIZONTAL_VISIBLE_COUNT = 6
     COMIC_MODE_LABELS = {
         "default": "⚙ Default",
         "comics": "📚 Comics",
@@ -54,6 +93,17 @@ class ViewerHud(QWidget):
         self._is_mouse_inside = False
         self._is_pointer_in_activation_band = False
         self._fade_target_visible = False
+        self._at_top = False
+        self._thumbnail_layout = "vertical"
+        self._hud_scale_percent = 100
+        self._page_count = 0
+        self._current_thumbnail_index = -1
+        self._thumbnail_items_populated = False
+        self._thumbnail_requested_indices: set[int] = set()
+        self._thumbnail_pixmaps: dict[int, QPixmap] = {}
+        self._thumbnail_source_images: dict[int, QImage] = {}
+        self._thumbnail_grid_size = QSize(self.THUMBNAIL_GRID_SIZE)
+        self._thumbnail_render_size = QSize(self.THUMBNAIL_ICON_SIZE)
 
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self._opacity_effect.setOpacity(1.0)
@@ -208,7 +258,109 @@ class ViewerHud(QWidget):
         self.btn_fullscreen.clicked.connect(self.fullscreen_toggled.emit)
         pill_layout.addWidget(self.btn_fullscreen)
 
+        pill_layout.addWidget(self._make_separator())
+
+        self.btn_hud_size = QToolButton(self.pill)
+        self.btn_hud_size.setText("Aa")
+        self.btn_hud_size.setToolTip("Adjust HUD and text size")
+        self.btn_hud_size.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_hud_size.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._hud_size_menu = QMenu(self.btn_hud_size)
+        size_widget = QWidget(self._hud_size_menu)
+        size_layout = QVBoxLayout(size_widget)
+        size_layout.setContentsMargins(12, 10, 12, 10)
+        size_layout.setSpacing(6)
+        self._hud_size_label = QLabel("HUD and text: 100%", size_widget)
+        self._hud_size_slider = QSlider(Qt.Orientation.Horizontal, size_widget)
+        self._hud_size_slider.setRange(75, 150)
+        self._hud_size_slider.setSingleStep(5)
+        self._hud_size_slider.setPageStep(10)
+        self._hud_size_slider.setValue(100)
+        self._hud_size_slider.setMinimumWidth(180)
+        self._hud_size_slider.valueChanged.connect(self._on_hud_scale_changed)
+        size_layout.addWidget(self._hud_size_label)
+        size_layout.addWidget(self._hud_size_slider)
+        size_action = QWidgetAction(self._hud_size_menu)
+        size_action.setDefaultWidget(size_widget)
+        self._hud_size_menu.addAction(size_action)
+        self.btn_hud_size.setMenu(self._hud_size_menu)
+        pill_layout.addWidget(self.btn_hud_size)
+
+        pill_layout.addWidget(self._make_separator())
+
+        self.btn_thumbnails = QPushButton("▦", self.pill)
+        self.btn_thumbnails.setCheckable(True)
+        self.btn_thumbnails.setChecked(False)
+        self.btn_thumbnails.setToolTip("Show or hide page thumbnails")
+        self.btn_thumbnails.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_thumbnails.toggled.connect(self._on_thumbnails_toggled)
+        pill_layout.addWidget(self.btn_thumbnails)
+
+        thumbnail_parent = self.parentWidget() or self
+        self.thumbnail_list = ThumbnailListWidget(thumbnail_parent)
+        self.thumbnail_list.setObjectName("thumbnailStrip")
+        self.thumbnail_list.setViewMode(QListView.ViewMode.IconMode)
+        self.thumbnail_list.setWrapping(False)
+        self.thumbnail_list.setMovement(QListView.Movement.Static)
+        self.thumbnail_list.setResizeMode(QListView.ResizeMode.Fixed)
+        self.thumbnail_list.setUniformItemSizes(True)
+        self.thumbnail_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.thumbnail_list.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.thumbnail_list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.thumbnail_list.setIconSize(self.THUMBNAIL_ICON_SIZE)
+        self.thumbnail_list.setGridSize(self.THUMBNAIL_GRID_SIZE)
+        self.thumbnail_list.setStyleSheet(
+            "QListWidget#thumbnailStrip {"
+            "  background-color: #242830;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  outline: none;"
+            "}"
+            "QListWidget#thumbnailStrip::item {"
+            "  background-color: #343944;"
+            "  border: 1px solid #464c58;"
+            "  border-radius: 3px;"
+            "}"
+            "QListWidget#thumbnailStrip::item:hover { border-color: #8ab4f8; }"
+            "QListWidget#thumbnailStrip::item:selected {"
+            "  background-color: #263b58;"
+            "  border: 2px solid #8ab4f8;"
+            "}"
+            "QScrollBar:horizontal { height: 3px; background: transparent; }"
+            "QScrollBar::handle:horizontal {"
+            "  background: #697180; min-width: 20px; border-radius: 1px;"
+            "}"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {"
+            "  width: 0px;"
+            "}"
+            "QScrollBar:vertical { width: 5px; background: transparent; }"
+            "QScrollBar::handle:vertical {"
+            "  background: #697180; min-height: 24px; border-radius: 2px;"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "  height: 0px;"
+            "}"
+        )
+        self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
+        self.thumbnail_list.horizontalScrollBar().valueChanged.connect(
+            lambda _value: self._queue_visible_thumbnails()
+        )
+        self.thumbnail_list.verticalScrollBar().valueChanged.connect(
+            lambda _value: self._queue_visible_thumbnails()
+        )
+        self.thumbnail_list.pointer_entered.connect(self._on_thumbnail_entered)
+        self.thumbnail_list.pointer_left.connect(self._on_thumbnail_left)
+        self._configure_thumbnail_list()
+        self.thumbnail_list.hide()
+
         main_layout.addWidget(self.pill)
+        self._apply_hud_scale()
         self.adjustSize()
 
     def _make_separator(self) -> QWidget:
@@ -246,6 +398,310 @@ class ViewerHud(QWidget):
             can_next if can_next is not None else current_index < total_pages - 1
         )
         self._reserve_page_width(total_pages)
+        self._select_current_thumbnail(current_index)
+
+    def set_page_count(self, total_pages: int) -> None:
+        """Reset the per-document thumbnail strip without decoding any pages."""
+        self._page_count = max(0, total_pages)
+        self._current_thumbnail_index = -1
+        self._thumbnail_items_populated = False
+        self._thumbnail_requested_indices.clear()
+        self._thumbnail_pixmaps.clear()
+        self._thumbnail_source_images.clear()
+        self.thumbnail_list.clear()
+        if self.btn_thumbnails.isChecked():
+            self._populate_thumbnail_items()
+
+    def set_thumbnail(self, index: int, image: QImage) -> None:
+        """Install a decoded thumbnail and retain it for this document."""
+        if not (0 <= index < self._page_count) or image.isNull():
+            return
+
+        self._thumbnail_source_images[index] = image.copy()
+        self._render_thumbnail(index)
+
+    def _render_thumbnail(self, index: int) -> None:
+        image = self._thumbnail_source_images.get(index)
+        if image is None or image.isNull():
+            return
+        canvas = QPixmap(self._thumbnail_render_size)
+        canvas.fill(QColor("#343944"))
+        page_image = image.scaled(
+            self._thumbnail_render_size - QSize(4, 4),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        page = QPixmap.fromImage(page_image)
+        painter = QPainter(canvas)
+        painter.drawPixmap(
+            (canvas.width() - page.width()) // 2,
+            (canvas.height() - page.height()) // 2,
+            page,
+        )
+        painter.end()
+
+        self._thumbnail_pixmaps[index] = canvas
+        if self._thumbnail_items_populated:
+            item = self.thumbnail_list.item(index)
+            if item is not None:
+                item.setIcon(QIcon(canvas))
+
+    def invalidate_thumbnail(self, index: int) -> None:
+        """Discard one transformed preview so it can be requested again."""
+        if not (0 <= index < self._page_count):
+            return
+        self._thumbnail_requested_indices.discard(index)
+        self._thumbnail_pixmaps.pop(index, None)
+        self._thumbnail_source_images.pop(index, None)
+        if self._thumbnail_items_populated:
+            item = self.thumbnail_list.item(index)
+            if item is not None:
+                placeholder = QPixmap(self._thumbnail_render_size)
+                placeholder.fill(QColor("#343944"))
+                item.setIcon(QIcon(placeholder))
+        if self.btn_thumbnails.isChecked():
+            self._thumbnail_requested_indices.add(index)
+            self.thumbnail_requested.emit(index)
+
+    def set_thumbnails_visible(self, visible: bool) -> None:
+        """Synchronize the thumbnail strip with a menu or restored setting."""
+        previous = self.btn_thumbnails.blockSignals(True)
+        self.btn_thumbnails.setChecked(visible)
+        self.btn_thumbnails.blockSignals(previous)
+        self._apply_thumbnails_visible(visible)
+
+    def thumbnails_visible(self) -> bool:
+        return self.btn_thumbnails.isChecked()
+
+    def set_thumbnail_layout(self, layout: str) -> None:
+        """Use a horizontal filmstrip or a full-height vertical sidebar."""
+        if layout not in {"horizontal", "vertical"}:
+            layout = "vertical"
+        self._thumbnail_layout = layout
+        self._configure_thumbnail_list()
+        parent = self.parentWidget()
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
+        if self.btn_thumbnails.isChecked():
+            self._select_current_thumbnail(self._current_thumbnail_index, force=True)
+
+    def thumbnail_layout(self) -> str:
+        return self._thumbnail_layout
+
+    def set_hud_scale(self, percent: int) -> None:
+        percent = max(75, min(150, int(percent)))
+        previous = self._hud_size_slider.blockSignals(True)
+        self._hud_size_slider.setValue(percent)
+        self._hud_size_slider.blockSignals(previous)
+        self._hud_scale_percent = percent
+        self._apply_hud_scale()
+
+    def hud_scale(self) -> int:
+        return self._hud_scale_percent
+
+    def _on_hud_scale_changed(self, percent: int) -> None:
+        self._hud_scale_percent = percent
+        self._apply_hud_scale()
+        self.hud_scale_changed.emit(percent)
+
+    def _apply_hud_scale(self) -> None:
+        scale = self._hud_scale_percent / 100.0
+        font_size = max(10, int(round(13 * scale)))
+        vertical_padding = max(2, int(round(4 * scale)))
+        horizontal_padding = max(5, int(round(8 * scale)))
+        minimum_height = max(20, int(round(24 * scale)))
+        radius = max(4, int(round(8 * scale)))
+        self.pill.setStyleSheet(
+            "#hudPill {"
+            "  background-color: rgba(26, 26, 26, 0.90);"
+            "  border: 1px solid rgba(255, 255, 255, 0.15);"
+            f"  border-radius: {radius}px;"
+            "}"
+            "QPushButton, QToolButton {"
+            "  background: transparent;"
+            "  color: #e0e0e0;"
+            f"  font-size: {font_size}px;"
+            "  font-weight: 500;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            f"  padding: {vertical_padding}px {horizontal_padding}px;"
+            f"  min-height: {minimum_height}px;"
+            "}"
+            "QPushButton:hover, QToolButton:hover {"
+            "  background-color: rgba(255, 255, 255, 0.15);"
+            "  color: #ffffff;"
+            "}"
+            "QPushButton:pressed, QToolButton:pressed {"
+            "  background-color: rgba(255, 255, 255, 0.25);"
+            "}"
+            "QPushButton:disabled, QToolButton:disabled { color: #555555; }"
+            f"QLabel {{ color: #888888; font-size: {font_size}px; }}"
+        )
+        pill_layout = self.pill.layout()
+        if pill_layout is not None:
+            pill_layout.setContentsMargins(
+                max(6, int(round(10 * scale))),
+                max(3, int(round(5 * scale))),
+                max(6, int(round(10 * scale))),
+                max(3, int(round(5 * scale))),
+            )
+            pill_layout.setSpacing(max(3, int(round(6 * scale))))
+        self.btn_page.setStyleSheet(
+            "font-weight: bold; "
+            f"padding: {vertical_padding}px {max(7, int(round(10 * scale)))}px; "
+            "color: #ffffff;"
+        )
+        self._hud_size_label.setText(f"HUD and text: {self._hud_scale_percent}%")
+        self._refresh_layout_geometry()
+        parent = self.parentWidget()
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
+
+    def set_at_top(self, at_top: bool) -> None:
+        self._at_top = bool(at_top)
+        parent = self.parentWidget()
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
+
+    def is_at_top(self) -> bool:
+        return self._at_top
+
+    def _on_thumbnails_toggled(self, visible: bool) -> None:
+        self._apply_thumbnails_visible(visible)
+        self.thumbnails_toggled.emit(visible)
+
+    def _apply_thumbnails_visible(self, visible: bool) -> None:
+        if visible:
+            self._populate_thumbnail_items()
+            if not self.isHidden() or self._fade_target_visible:
+                self._show_thumbnail_panel()
+            self._select_current_thumbnail(self._current_thumbnail_index, force=True)
+            QTimer.singleShot(0, self._queue_visible_thumbnails)
+        else:
+            self.thumbnail_list.hide()
+        self._refresh_layout_geometry()
+        parent = self.parentWidget()
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
+
+    def _populate_thumbnail_items(self) -> None:
+        if self._thumbnail_items_populated:
+            return
+        self.thumbnail_list.clear()
+        placeholder = QPixmap(self._thumbnail_render_size)
+        placeholder.fill(QColor("#343944"))
+        placeholder_icon = QIcon(placeholder)
+        for index in range(self._page_count):
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            item.setToolTip(f"Go to page {index + 1}")
+            item.setSizeHint(self._thumbnail_grid_size)
+            item.setIcon(
+                QIcon(self._thumbnail_pixmaps[index])
+                if index in self._thumbnail_pixmaps
+                else placeholder_icon
+            )
+            self.thumbnail_list.addItem(item)
+        self._thumbnail_items_populated = True
+
+    def _configure_thumbnail_list(self) -> None:
+        is_vertical = self._thumbnail_layout == "vertical"
+        self.thumbnail_list.setFlow(
+            QListView.Flow.TopToBottom
+            if is_vertical
+            else QListView.Flow.LeftToRight
+        )
+        self.thumbnail_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if is_vertical
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.thumbnail_list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if is_vertical
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.thumbnail_list.scheduleDelayedItemsLayout()
+
+    def _select_current_thumbnail(self, index: int, force: bool = False) -> None:
+        if not (0 <= index < self._page_count):
+            return
+        changed = index != self._current_thumbnail_index
+        self._current_thumbnail_index = index
+        if not self.btn_thumbnails.isChecked():
+            return
+        self._populate_thumbnail_items()
+        item = self.thumbnail_list.item(index)
+        if item is None:
+            return
+        self.thumbnail_list.setCurrentItem(item)
+        if changed or force:
+            self.thumbnail_list.scrollToItem(
+                item, QAbstractItemView.ScrollHint.PositionAtCenter
+            )
+            QTimer.singleShot(0, self._queue_visible_thumbnails)
+
+    def _queue_visible_thumbnails(self) -> None:
+        if not self.btn_thumbnails.isChecked() or self._page_count <= 0:
+            return
+        is_vertical = self._thumbnail_layout == "vertical"
+        item_extent = max(
+            1,
+            self._thumbnail_grid_size.height()
+            if is_vertical
+            else self._thumbnail_grid_size.width(),
+        )
+        viewport_extent = max(
+            item_extent,
+            self.thumbnail_list.viewport().height()
+            if is_vertical
+            else self.thumbnail_list.viewport().width(),
+        )
+        scrollbar = (
+            self.thumbnail_list.verticalScrollBar()
+            if is_vertical
+            else self.thumbnail_list.horizontalScrollBar()
+        )
+        first = max(0, scrollbar.value() // item_extent - 2)
+        visible_count = viewport_extent // item_extent + 5
+        indices = set(range(first, min(self._page_count, first + visible_count)))
+        if 0 <= self._current_thumbnail_index < self._page_count:
+            indices.update(
+                range(
+                    max(0, self._current_thumbnail_index - 2),
+                    min(self._page_count, self._current_thumbnail_index + 3),
+                )
+            )
+        ordered = sorted(
+            indices,
+            key=lambda value: (abs(value - self._current_thumbnail_index), value),
+        )
+        for index in ordered:
+            if index in self._thumbnail_requested_indices:
+                continue
+            self._thumbnail_requested_indices.add(index)
+            self.thumbnail_requested.emit(index)
+
+    def _on_thumbnail_clicked(self, item: QListWidgetItem) -> None:
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(index, int):
+            self.thumbnail_clicked.emit(index)
+
+    def _on_thumbnail_entered(self) -> None:
+        self._is_mouse_inside = True
+        self._hide_timer.stop()
+        self._show_with_fade()
+
+    def _on_thumbnail_left(self) -> None:
+        self._is_mouse_inside = False
+        if not self.isHidden():
+            self._hide_timer.start()
+
+    def _show_thumbnail_panel(self) -> None:
+        if not self.btn_thumbnails.isChecked() or self._page_count <= 0:
+            return
+        self.thumbnail_list.show()
+        self.thumbnail_list.raise_()
 
     def _reserve_page_width(self, total_pages: int) -> None:
         """Keep the widest page count readable instead of letting it compress."""
@@ -307,13 +763,83 @@ class ViewerHud(QWidget):
         self.adjustSize()
 
     def reposition(self, parent_width: int, parent_height: int):
-        """Center the HUD horizontally near the bottom of the parent window."""
+        """Center the HUD horizontally near the configured viewer edge."""
         self._refresh_layout_geometry()
         w = self.sizeHint().width()
         h = self.sizeHint().height()
-        x = (parent_width - w) // 2
-        y = parent_height - h - 24  # 24px margin from bottom
+        x = max(0, (parent_width - w) // 2)
+        menu_offset = 0
+        parent = self.parentWidget()
+        menu_bar = getattr(parent, "menuBar", lambda: None)()
+        if menu_bar is not None and menu_bar.isVisible():
+            menu_offset = menu_bar.height()
+        if self._at_top:
+            y = menu_offset + self.EDGE_MARGIN
+        else:
+            y = parent_height - h - self.EDGE_MARGIN
         self.setGeometry(x, max(0, y), w, h)
+        self._reposition_thumbnail_panel(parent_width, parent_height, menu_offset)
+
+    def _reposition_thumbnail_panel(
+        self, parent_width: int, parent_height: int, menu_offset: int
+    ) -> None:
+        if self._thumbnail_layout == "vertical":
+            top = menu_offset + 12
+            height = max(120, parent_height - top - 12)
+            self.thumbnail_list.setGeometry(
+                12,
+                top,
+                min(self.THUMBNAIL_SIDEBAR_WIDTH, max(120, parent_width - 24)),
+                height,
+            )
+            self._update_thumbnail_dimensions()
+            return
+
+        width = min(self.THUMBNAIL_STRIP_WIDTH, max(180, parent_width - 32))
+        height = min(
+            self.THUMBNAIL_FILMSTRIP_HEIGHT,
+            max(120, parent_height - menu_offset - self.height() - 48),
+        )
+        x = max(0, (parent_width - width) // 2)
+        if self._at_top:
+            y = self.y() + self.height() + 8
+        else:
+            y = self.y() - height - 8
+        y = max(menu_offset + 8, min(y, parent_height - height - 8))
+        self.thumbnail_list.setGeometry(x, y, width, height)
+        self._update_thumbnail_dimensions()
+
+    def _update_thumbnail_dimensions(self) -> None:
+        """Fit exactly five sidebar slots or six filmstrip slots without cropping."""
+        if self._thumbnail_layout == "vertical":
+            grid_size = QSize(
+                max(20, self.thumbnail_list.width() - 14),
+                max(20, (self.thumbnail_list.height() - 4) // self.VERTICAL_VISIBLE_COUNT),
+            )
+        else:
+            grid_size = QSize(
+                max(20, (self.thumbnail_list.width() - 4) // self.HORIZONTAL_VISIBLE_COUNT),
+                max(20, self.thumbnail_list.height() - 8),
+            )
+        render_size = QSize(
+            max(8, grid_size.width() - 12),
+            max(8, grid_size.height() - 12),
+        )
+        if (
+            grid_size == self._thumbnail_grid_size
+            and render_size == self._thumbnail_render_size
+        ):
+            return
+        self._thumbnail_grid_size = grid_size
+        self._thumbnail_render_size = render_size
+        self.thumbnail_list.setGridSize(grid_size)
+        self.thumbnail_list.setIconSize(render_size)
+        for index in range(self.thumbnail_list.count()):
+            item = self.thumbnail_list.item(index)
+            if item is not None:
+                item.setSizeHint(grid_size)
+        for index in tuple(self._thumbnail_source_images):
+            self._render_thumbnail(index)
 
     def on_pointer_move(self, parent_y: int) -> None:
         """Reveal the HUD only while the pointer is near its vertical level."""
@@ -346,6 +872,7 @@ class ViewerHud(QWidget):
         self._fade_animation.stop()
         self._fade_target_visible = False
         self._opacity_effect.setOpacity(1.0)
+        self.thumbnail_list.hide()
         self.hide()
 
     def toggle_pin(self) -> None:
@@ -380,6 +907,7 @@ class ViewerHud(QWidget):
         self._opacity_effect.setOpacity(start_opacity)
         self.show()
         self.raise_()
+        self._show_thumbnail_panel()
         self._fade_animation.setStartValue(start_opacity)
         self._fade_animation.setEndValue(1.0)
         self._fade_animation.start()
@@ -393,5 +921,6 @@ class ViewerHud(QWidget):
 
     def _finish_fade(self) -> None:
         if self._opacity_effect.opacity() <= 0.0:
+            self.thumbnail_list.hide()
             self.hide()
             self._opacity_effect.setOpacity(1.0)
