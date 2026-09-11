@@ -4,13 +4,15 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from PyQt6.QtCore import QMimeData, QPointF, QSize, Qt, QUrl, QEvent
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QKeyEvent
-from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtWidgets import QApplication, QFileDialog, QLabel
 
 from comic_scroll_reader.__main__ import is_desktop_file_installed, parse_arguments
 from comic_scroll_reader.about_dialog import AboutDialog
 from comic_scroll_reader.hud_overlay import ViewerHud
+from comic_scroll_reader.image_pipeline import DecodeRequest, DecodeResult
 from comic_scroll_reader.main_window import ComicMode, MainWindow, ViewerMode
 from comic_scroll_reader.shortcuts_dialog import ShortcutsDialog
 from comic_scroll_reader.welcome_widget import WelcomeWidget
@@ -236,6 +238,96 @@ class TestViewerHud(unittest.TestCase):
         self.assertEqual(self.hud.x(), expected_x)
         self.assertGreater(self.hud.y(), 0)
 
+        bottom_y = self.hud.y()
+        self.hud.set_at_top(True)
+        self.hud.reposition(parent_width=1280, parent_height=720)
+        self.assertEqual(self.hud.y(), ViewerHud.EDGE_MARGIN)
+        self.assertLess(self.hud.y(), bottom_y)
+
+    def test_thumbnail_strip_is_opt_in_lazy_and_clickable(self):
+        requested = []
+        clicked = []
+        self.hud.thumbnail_requested.connect(requested.append)
+        self.hud.thumbnail_clicked.connect(clicked.append)
+        self.hud.set_page_count(20)
+        self.hud.set_page_info(current_index=8, total_pages=20)
+
+        self.assertFalse(self.hud.thumbnails_visible())
+        self.assertTrue(self.hud.thumbnail_list.isHidden())
+        self.assertEqual(self.hud.thumbnail_list.count(), 0)
+
+        self.hud.show()
+        self.hud.btn_thumbnails.click()
+        self.hud._queue_visible_thumbnails()
+        self.assertTrue(self.hud.thumbnails_visible())
+        self.assertFalse(self.hud.thumbnail_list.isHidden())
+        self.assertEqual(self.hud.thumbnail_list.count(), 20)
+        self.assertIn(8, requested)
+
+        self.hud.reposition(parent_width=1280, parent_height=720)
+        vertical_grid = self.hud.thumbnail_list.gridSize()
+        self.assertEqual(
+            self.hud.thumbnail_list.height() // vertical_grid.height(),
+            ViewerHud.VERTICAL_VISIBLE_COUNT,
+        )
+
+        self.hud.set_thumbnail_layout("horizontal")
+        self.hud.reposition(parent_width=1280, parent_height=720)
+        horizontal_grid = self.hud.thumbnail_list.gridSize()
+        self.assertEqual(
+            self.hud.thumbnail_list.width() // horizontal_grid.width(),
+            ViewerHud.HORIZONTAL_VISIBLE_COUNT,
+        )
+
+        self.hud.reposition(parent_width=320, parent_height=180)
+        compact_horizontal_grid = self.hud.thumbnail_list.gridSize()
+        self.assertEqual(
+            self.hud.thumbnail_list.width() // compact_horizontal_grid.width(),
+            ViewerHud.HORIZONTAL_VISIBLE_COUNT,
+        )
+        self.hud.set_thumbnail_layout("vertical")
+        self.hud.reposition(parent_width=320, parent_height=180)
+        compact_vertical_grid = self.hud.thumbnail_list.gridSize()
+        self.assertEqual(
+            self.hud.thumbnail_list.height() // compact_vertical_grid.height(),
+            ViewerHud.VERTICAL_VISIBLE_COUNT,
+        )
+
+        self.hud.thumbnail_list.itemClicked.emit(self.hud.thumbnail_list.item(12))
+        self.assertEqual(clicked, [12])
+
+        image = QImage(100, 150, QImage.Format.Format_RGB32)
+        image.fill(QColor("blue"))
+        self.hud.set_thumbnail(8, image)
+        self.assertIn(8, self.hud._thumbnail_pixmaps)
+        self.assertEqual(
+            self.hud._thumbnail_pixmaps[8].height(),
+            self.hud._thumbnail_render_size.height(),
+        )
+        rendered = self.hud._thumbnail_pixmaps[8].toImage()
+        self.assertEqual(
+            rendered.pixelColor(rendered.width() // 2, rendered.height() // 2),
+            QColor("blue"),
+        )
+        self.assertNotEqual(rendered.pixelColor(0, 0), QColor("blue"))
+
+        self.hud._queue_visible_thumbnails()
+        already_requested = list(requested)
+        self.hud._queue_visible_thumbnails()
+        self.assertEqual(requested, already_requested)
+
+    def test_hud_size_slider_scales_controls_and_emits(self):
+        changed = []
+        self.hud.hud_scale_changed.connect(changed.append)
+        original_height = self.hud.sizeHint().height()
+
+        self.hud._hud_size_slider.setValue(135)
+
+        self.assertEqual(self.hud.hud_scale(), 135)
+        self.assertEqual(changed, [135])
+        self.assertIn("135%", self.hud._hud_size_label.text())
+        self.assertGreater(self.hud.sizeHint().height(), original_height)
+
     def test_hud_button_signals(self):
         signals = []
         self.hud.prev_clicked.connect(lambda: signals.append("prev"))
@@ -448,14 +540,16 @@ class TestMainWindowInterface(unittest.TestCase):
         menubar = window.menuBar()
         actions = [action.text() for action in menubar.actions()]
         self.assertIn("&File", actions)
+        self.assertIn("&Edit", actions)
         self.assertIn("&View", actions)
         self.assertIn("&Comic Modes", actions)
         self.assertIn("&Navigate", actions)
         self.assertIn("&Help", actions)
 
+        menus = {action.text(): action.menu() for action in menubar.actions()}
         view_actions = [
             action.text()
-            for action in menubar.actions()[1].menu().actions()
+            for action in menus["&View"].actions()
             if not action.isSeparator()
         ]
         self.assertLess(
@@ -465,13 +559,125 @@ class TestMainWindowInterface(unittest.TestCase):
         self.assertTrue(window._directional_pan_action.isChecked())
         self.assertTrue(window._double_spread_action.isChecked())
         self.assertIn("Maintain ratios in scroll", view_actions)
+        self.assertIn("Show Page &Thumbnails", view_actions)
+        self.assertIn("Place HUD at &Top", view_actions)
+        self.assertNotIn("Arrow / WASD Keys Pan Zoomed Images", view_actions)
         self.assertFalse(window._maintain_ratios_action.isChecked())
         comic_mode_actions = [
             action.text()
-            for action in menubar.actions()[2].menu().actions()
+            for action in menus["&Comic Modes"].actions()
             if not action.isSeparator()
         ]
         self.assertNotIn("Maintain ratios in scroll", comic_mode_actions)
+        navigate_actions = [
+            action.text()
+            for action in menus["&Navigate"].actions()
+            if not action.isSeparator()
+        ]
+        self.assertIn("Arrow / WASD Keys Pan Zoomed Images", navigate_actions)
+        self.assertIn("Thumbnail &Layout", navigate_actions)
+        edit_actions = [
+            action.text()
+            for action in menus["&Edit"].actions()
+            if not action.isSeparator()
+        ]
+        self.assertIn("Rotate / Spin Left 90°", edit_actions)
+        self.assertIn("Rotate / Spin Right 90°", edit_actions)
+        self.assertIn("Mirror Horizontally", edit_actions)
+        self.assertIn("Flip Vertically", edit_actions)
+        self.assertIn("Save Current Page &As...", edit_actions)
+        self.assertTrue(window._always_save_options_action.isChecked())
+        window.deleteLater()
+
+    def test_thumbnail_controls_jump_and_stay_synchronized(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assertFalse(window._thumbnail_action.isChecked())
+        self.assertFalse(window._hud.thumbnails_visible())
+
+        window._thumbnail_action.trigger()
+        self.assertTrue(window._thumbnail_action.isChecked())
+        self.assertTrue(window._hud.thumbnails_visible())
+        self.assertEqual(window._hud.thumbnail_layout(), "vertical")
+
+        window._thumbnail_layout_actions["horizontal"].trigger()
+        self.assertEqual(window._hud.thumbnail_layout(), "horizontal")
+
+        window._hud.thumbnail_clicked.emit(2)
+        self.assertEqual(window._requested_index, 2)
+
+        window._hud.btn_thumbnails.click()
+        self.assertFalse(window._thumbnail_action.isChecked())
+        self.assertFalse(window._hud.thumbnails_visible())
+        window.shutdown()
+        window.deleteLater()
+
+    def test_page_edits_are_non_destructive_display_transforms(self):
+        window = MainWindow(target_path=self.temp_dir)
+        path = window.image_list[0]
+        image = QImage(2, 1, QImage.Format.Format_RGB32)
+        image.setPixelColor(0, 0, QColor("red"))
+        image.setPixelColor(1, 0, QColor("blue"))
+
+        edit = window._page_edit(path)
+        edit["mirror"] = True
+        mirrored = window._transform_image_for_display(image, path)
+        self.assertEqual(mirrored.pixelColor(0, 0), QColor("blue"))
+        self.assertEqual(mirrored.pixelColor(1, 0), QColor("red"))
+
+        edit["rotation"] = 90
+        rotated_size = window._transformed_source_size(QSize(100, 200), path)
+        self.assertEqual(rotated_size, QSize(200, 100))
+        rotated = window._transform_image_for_display(image, path)
+        self.assertEqual(rotated.size(), QSize(1, 2))
+
+        window.shutdown()
+        window.deleteLater()
+
+    def test_save_current_page_exports_edits_without_overwriting_source(self):
+        window = MainWindow(target_path=self.temp_dir)
+        source_path = window.image_list[0]
+        source_before = QImage(source_path)
+        target_path = os.path.join(self.temp_dir, "exported-edit.png")
+        window._page_edit(source_path)["rotation"] = 90
+        requested = []
+
+        with (
+            patch.object(
+                QFileDialog,
+                "getSaveFileName",
+                return_value=(target_path, "PNG Image (*.png)"),
+            ),
+            patch.object(
+                window._image_pipeline,
+                "request_full",
+                side_effect=lambda *args, **kwargs: requested.append(
+                    (args, kwargs)
+                ),
+            ),
+        ):
+            window.save_current_page_as()
+
+        self.assertEqual(len(requested), 1)
+        args, kwargs = requested[0]
+        self.assertEqual(args[:2], (source_path, window._edit_save_generation))
+        self.assertEqual(kwargs["purpose"], "edit-save")
+        result = DecodeResult(
+            request=DecodeRequest(
+                request_id=window._edit_save_generation,
+                path=source_path,
+                purpose="edit-save",
+                bounds=None,
+                cache_key=(),
+            ),
+            image=QImage(source_path),
+            source_size=source_before.size(),
+        )
+        window._on_image_ready(result)
+
+        self.assertTrue(os.path.isfile(target_path))
+        self.assertEqual(QImage(target_path).size(), QSize(150, 100))
+        self.assertEqual(QImage(source_path).size(), source_before.size())
+        window.shutdown()
         window.deleteLater()
 
     def test_comic_mode_presets_coordinate_layout_and_hud(self):

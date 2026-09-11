@@ -44,6 +44,7 @@ def test_invalid_settings_fall_back_to_defaults(qapp: QApplication):
     assert window.viewer_mode == ViewerMode.SINGLE
     assert window.comic_mode == ComicMode.DEFAULT
     assert window._maintain_ratios_action.isChecked() is False
+    assert window._always_save_options_action.isChecked() is True
     dispose_window(window, qapp)
 
 
@@ -51,6 +52,12 @@ def test_window_restores_all_reader_options(qapp: QApplication):
     first = MainWindow()
     first.viewer_mode = ViewerMode.SCROLL
     first._directional_pan_action.setChecked(False)
+    first._thumbnail_action.setChecked(True)
+    first._set_thumbnails_visible(True)
+    first._hud_top_action.setChecked(True)
+    first._set_hud_at_top(True)
+    first._set_thumbnail_layout("horizontal")
+    first._hud.set_hud_scale(130)
     first._double_page_action.setChecked(True)
     first._invert_pages_action.setChecked(True)
     first._page_spacing_action.setChecked(False)
@@ -69,6 +76,13 @@ def test_window_restores_all_reader_options(qapp: QApplication):
     assert restored.viewer_mode == ViewerMode.SCROLL
     assert restored.comic_mode == ComicMode.CUSTOM
     assert restored._directional_pan_action.isChecked() is False
+    assert restored._thumbnail_action.isChecked() is True
+    assert restored._hud.thumbnails_visible() is True
+    assert restored._hud_top_action.isChecked() is True
+    assert restored._hud.is_at_top() is True
+    assert restored._hud.thumbnail_layout() == "horizontal"
+    assert restored._thumbnail_layout_actions["horizontal"].isChecked() is True
+    assert restored._hud.hud_scale() == 130
     assert restored._double_page_action.isChecked() is True
     assert restored._invert_pages_action.isChecked() is True
     assert restored._page_spacing_action.isChecked() is False
@@ -76,6 +90,23 @@ def test_window_restores_all_reader_options(qapp: QApplication):
     assert restored._maintain_ratios_action.isChecked() is True
     assert restored.scroll_reader.maintain_ratios is True
     assert restored.scroll_reader.zoom_factor == 1.75
+    dispose_window(restored, qapp)
+
+
+def test_disabling_always_save_keeps_only_the_toggle_choice(qapp: QApplication):
+    first = MainWindow()
+    first._hud.set_hud_scale(145)
+    first._thumbnail_action.setChecked(True)
+    first._always_save_options_action.setChecked(False)
+    dispose_window(first, qapp)
+
+    saved = json.loads(state_file_path().read_text(encoding="utf-8"))
+    assert saved == {"version": 1, "always_save_options": False}
+
+    restored = MainWindow()
+    assert restored._always_save_options_action.isChecked() is False
+    assert restored._hud.hud_scale() == 100
+    assert restored._thumbnail_action.isChecked() is False
     dispose_window(restored, qapp)
 
 
