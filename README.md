@@ -43,7 +43,18 @@ Powered by **Python 3**, **PyQt6**, and **Google PDFium**, it combines instant s
   - Double-click to instantly reset zoom and position.
 - 🎯 **Minimalist Auto-Hiding HUD**:
   - Floating status pill displaying current page, total count, zoom level, and reader controls.
+  - Optional lazy page thumbnails with click-to-jump navigation, available as a
+    full-height five-page vertical sidebar or a six-page horizontal filmstrip.
+    Every preview is letterboxed to preserve the complete page at any aspect ratio.
+  - Choose the thumbnail layout from **Navigate → Thumbnail Layout**, and place
+    the HUD at the top or bottom from the View menu.
+  - Use the HUD's **Aa** quick control to resize the HUD and its text.
   - Fades out automatically to keep your screen distraction-free (press `H` to toggle).
+- ✏️ **Non-destructive Page Edits**:
+  - Rotate, mirror, flip, or reset the current page from the **Edit** menu.
+  - Export the result with **Save Current Page As…**; the source page is not changed.
+  - **Always Save Options** remembers reader and interface settings between launches
+    and is enabled by default.
 - 💻 **Cross-Platform Installers**:
   - Native installers available for **Linux** (`.deb` & `.rpm`), **Windows** (`.exe` setup), and **macOS** (`.dmg`).
   - Complete desktop integration: file associations (CBZ/CBR, PDFs, and images) and folder context menu ("Open with Comic Scroll Reader").
@@ -176,7 +187,7 @@ Comic Scroll Reader is designed to be operated entirely via keyboard and mouse w
 | <kbd>Ctrl</kbd> + **Mouse Wheel** | Smooth zoom in or out centered on cursor |
 | <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>-</kbd> | Zoom in / Zoom out |
 | <kbd>Ctrl</kbd> + <kbd>0</kbd> | Reset zoom to fit window |
-| **View → Arrow / WASD Keys Pan Zoomed Images** | Toggle directional-key panning; enabled by default |
+| **Navigate → Arrow / WASD Keys Pan Zoomed Images** | Toggle directional-key panning; enabled by default |
 | **Left Drag** | Pan the page or scroll viewport |
 | <kbd>Shift</kbd> + **Mouse Wheel** | Pan horizontally while zoomed |
 | **Mouse Wheel** | Pan vertically; seamlessly crosses page boundaries |
@@ -190,7 +201,7 @@ Comic Scroll Reader is designed to be operated entirely via keyboard and mouse w
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> | Open a comic / manga folder |
 | <kbd>Ctrl</kbd> + <kbd>W</kbd> | Close current document and return to welcome screen |
 | <kbd>F11</kbd> / <kbd>F</kbd> | Toggle distraction-free Fullscreen |
-| <kbd>H</kbd> | Toggle bottom HUD controls visibility |
+| <kbd>H</kbd> | Toggle HUD controls visibility |
 | <kbd>F1</kbd> | Open Keyboard & Mouse Shortcuts guide |
 | <kbd>Esc</kbd> | Exit fullscreen or close the reader |
 
