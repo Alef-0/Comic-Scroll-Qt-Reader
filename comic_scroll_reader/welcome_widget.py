@@ -17,7 +17,7 @@ from .resources import APP_ICON_PATH, APP_NAME
 class WelcomeWidget(QWidget):
     """Empty state widget shown when no file or folder is loaded.
 
-    Provides a clean drop target for images, comic folders, and PDF documents,
+    Provides a clean drop target for images, comic folders, PDFs, and CBZ/CBR files,
     along with quick action buttons to open files or folders, an about/help button,
     and a cheat sheet of essential keyboard and mouse shortcuts.
     """
@@ -99,7 +99,7 @@ class WelcomeWidget(QWidget):
         eyebrow_label.setObjectName("eyebrow")
         title_label = QLabel(APP_NAME, hero)
         title_label.setObjectName("title")
-        subtitle_label = QLabel("Images, comic folders, and PDFs—your way.", hero)
+        subtitle_label = QLabel("Images, folders, PDFs, and CBZ/CBR files—your way.", hero)
         subtitle_label.setObjectName("subtitle")
         subtitle_label.setWordWrap(True)
         identity_layout.addWidget(eyebrow_label)

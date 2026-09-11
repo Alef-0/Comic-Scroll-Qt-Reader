@@ -21,9 +21,12 @@ hiddenimports = [
     'comic_scroll_reader.about_dialog',
     'comic_scroll_reader.welcome_widget',
     'comic_scroll_reader.image_pipeline',
+    'comic_scroll_reader.archive_handler',
     'comic_scroll_reader.pdf_handler',
     'comic_scroll_reader.input_controls',
     'comic_scroll_reader.resources',
+    'comic_scroll_reader.settings',
+    'rarfile',
 ]
 
 # Ensure pypdfium2 binary libraries (libpdfium.dylib) and data are bundled
@@ -105,6 +108,12 @@ app = BUNDLE(
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '11.0',
         'CFBundleDocumentTypes': [
+            {
+                'CFBundleTypeName': 'Comic Book Archive',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'CFBundleTypeExtensions': ['cbz', 'cbr'],
+            },
             {
                 'CFBundleTypeName': 'PDF Document',
                 'CFBundleTypeRole': 'Viewer',

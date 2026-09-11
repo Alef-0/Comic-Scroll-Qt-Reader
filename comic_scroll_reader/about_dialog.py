@@ -86,7 +86,7 @@ class AboutDialog(QDialog):
         title = QLabel(APP_NAME, hero)
         title.setObjectName("appTitle")
         tagline = QLabel(
-            "A focused desktop reader for images, comic folders, and PDF documents.",
+            "A focused desktop reader for images, comic folders, PDFs, and CBZ/CBR archives.",
             hero,
         )
         tagline.setObjectName("appTagline")
@@ -136,7 +136,7 @@ class AboutDialog(QDialog):
             "<b>Single page</b> and <b>continuous scroll</b> reading &nbsp;•&nbsp; "
             "Drag and drop<br/>"
             "Anchored zoom and pan &nbsp;•&nbsp; Keyboard navigation &nbsp;•&nbsp; "
-            "Memory-bounded PDF viewing",
+            "Memory-bounded PDF and comic archive viewing",
             self,
         )
         features.setObjectName("featureText")

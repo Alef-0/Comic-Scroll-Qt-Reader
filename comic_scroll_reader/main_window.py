@@ -28,9 +28,16 @@ from PyQt6.QtGui import (
     QResizeEvent,
     QWheelEvent,
 )
-from PyQt6.QtCore import QEvent, Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QSize, QTimer, pyqtSignal
 
 from .about_dialog import AboutDialog
+from .archive_handler import (
+    build_archive_page_uri,
+    close_archive_handler,
+    get_archive_handler,
+    is_comic_archive_file,
+    parse_archive_page_uri,
+)
 from .hud_overlay import ViewerHud
 from .image_pipeline import DecodeResult, ImagePipeline
 from .input_controls import (
@@ -47,6 +54,7 @@ from .pdf_handler import (
 )
 from .resources import APP_ICON_PATH, APP_NAME
 from .scroll_reader import ScrollReaderWidget
+from .settings import load_state, save_state
 from .shortcuts_dialog import ShortcutsDialog
 from .single_viewer import ImageViewerWidget, ScaledImageLabel
 from .welcome_widget import WelcomeWidget
@@ -236,14 +244,11 @@ class MainWindow(QMainWindow):
             widget.setMouseTracking(True)
         self.setMouseTracking(True)
 
-        # Native Menu Bar
-        self.comic_mode = ComicMode.DEFAULT
-        self._init_menu_bar()
-        self._sync_comic_mode_state()
-
-        # Image folder discovery / PDF state
+        # Initialize document state before restoring options. Restoring a saved
+        # zoom emits zoom_changed, whose title update reads these attributes.
         self.folder_path: Optional[str] = None
         self.pdf_path: Optional[str] = None
+        self.archive_path: Optional[str] = None
         self.image_list: List[str] = []
         self.current_index: int = -1
         self._requested_index: Optional[int] = None
@@ -256,6 +261,13 @@ class MainWindow(QMainWindow):
             tuple[int, float, float, bool]
         ] = None
 
+        # Native Menu Bar
+        self.comic_mode = ComicMode.DEFAULT
+        self._restore_fullscreen_requested = False
+        self._init_menu_bar()
+        self._restore_state(load_state())
+        self._sync_comic_mode_state()
+
         initial_path = target_path or image_path
         if initial_path:
             self.load_image(initial_path)
@@ -263,6 +275,113 @@ class MainWindow(QMainWindow):
             self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
             self._stack.setCurrentWidget(self.welcome_widget)
             self.update_title()
+
+        if self._restore_fullscreen_requested:
+            QTimer.singleShot(0, self._restore_fullscreen)
+
+    @staticmethod
+    def _state_bool(value, fallback: bool) -> bool:
+        return value if isinstance(value, bool) else fallback
+
+    def _restore_state(self, state: dict) -> None:
+        """Restore validated reader options without reopening the previous book."""
+        try:
+            self.viewer_mode = ViewerMode(
+                state.get("viewer_mode", ViewerMode.SINGLE.value)
+            )
+        except (TypeError, ValueError):
+            self.viewer_mode = ViewerMode.SINGLE
+
+        try:
+            saved_comic_mode = ComicMode(
+                state.get("comic_mode", ComicMode.DEFAULT.value)
+            )
+        except (TypeError, ValueError):
+            saved_comic_mode = ComicMode.DEFAULT
+
+        presets = {
+            ComicMode.DEFAULT: (False, False, True, True),
+            ComicMode.COMICS: (True, False, True, True),
+            ComicMode.MANGA: (True, True, True, True),
+            ComicMode.WEBTOON: (False, False, False, False),
+            ComicMode.CUSTOM: (False, False, True, True),
+        }
+        fallback_layout = presets[saved_comic_mode]
+        layout = state.get("layout", {})
+        if not isinstance(layout, dict):
+            layout = {}
+
+        double_page = self._state_bool(
+            layout.get("double_page"), fallback_layout[0]
+        )
+        invert_pages = self._state_bool(
+            layout.get("invert_pages"), fallback_layout[1]
+        )
+        page_spacing = self._state_bool(
+            layout.get("page_spacing"), fallback_layout[2]
+        )
+        detect_spreads = self._state_bool(
+            layout.get("detect_double_spreads"), fallback_layout[3]
+        )
+        maintain_ratios = self._state_bool(
+            layout.get("maintain_ratios_in_scroll"), False
+        )
+
+        self._double_page_action.setChecked(double_page)
+        self._invert_pages_action.setChecked(invert_pages)
+        self._page_spacing_action.setChecked(page_spacing)
+        self._double_spread_action.setChecked(detect_spreads)
+        self._maintain_ratios_action.setChecked(maintain_ratios)
+        self._directional_pan_action.setChecked(
+            self._state_bool(state.get("directional_pan"), True)
+        )
+
+        self.scroll_reader.set_layout_options(
+            double_page=double_page,
+            invert_page_order=invert_pages,
+            page_spacing=page_spacing,
+            detect_double_spreads=detect_spreads,
+            maintain_ratios=maintain_ratios,
+        )
+        self.image_viewer.set_layout_options(
+            double_page=double_page,
+            invert_page_order=invert_pages,
+            page_spacing=page_spacing,
+        )
+
+        scroll_zoom = state.get("scroll_zoom", 1.0)
+        if isinstance(scroll_zoom, (int, float)) and not isinstance(
+            scroll_zoom, bool
+        ):
+            self.scroll_reader.set_zoom(float(scroll_zoom))
+        self._restore_fullscreen_requested = self._state_bool(
+            state.get("fullscreen"), False
+        )
+
+    def _state_snapshot(self) -> dict:
+        """Capture all persistent reader and View-menu options."""
+        return {
+            "viewer_mode": self.viewer_mode.value,
+            "comic_mode": self.comic_mode.value,
+            "directional_pan": self._directional_pan_action.isChecked(),
+            "fullscreen": self.isFullScreen(),
+            "scroll_zoom": self.scroll_reader.zoom_factor,
+            "layout": {
+                "double_page": self._double_page_action.isChecked(),
+                "invert_pages": self._invert_pages_action.isChecked(),
+                "page_spacing": self._page_spacing_action.isChecked(),
+                "detect_double_spreads": self._double_spread_action.isChecked(),
+                "maintain_ratios_in_scroll": (
+                    self._maintain_ratios_action.isChecked()
+                ),
+            },
+        }
+
+    def _restore_fullscreen(self) -> None:
+        if not self.isFullScreen():
+            self.showFullScreen()
+            self.menuBar().setVisible(False)
+            self._hud.set_fullscreen(True)
 
     def set_mode(self, mode: ViewerMode) -> None:
         """Switch reader modes while synchronizing the current page and view."""
@@ -428,6 +547,12 @@ class MainWindow(QMainWindow):
         if self.viewer_mode == ViewerMode.SINGLE and self.image_list and self.current_index >= 0:
             self._request_index(self.current_index, force=True)
 
+    def _apply_scroll_ratio_option(self) -> None:
+        """Apply the independent native-size ratio option to scroll mode only."""
+        self.scroll_reader.set_layout_options(
+            maintain_ratios=self._maintain_ratios_action.isChecked()
+        )
+
     def _double_spread_indices(self) -> Set[int]:
         return self.scroll_reader.horizontal_page_indices(self.image_viewer.size())
 
@@ -466,10 +591,14 @@ class MainWindow(QMainWindow):
         self, folder_path: str, initial_file: Optional[str] = None
     ) -> bool:
         """Scan a folder for supported images, sort them alphabetically, and open the target."""
-        if self.pdf_path:
+        if self.pdf_path or self.archive_path:
             self._image_pipeline.wait_for_idle()
+        if self.pdf_path:
             close_pdf_handler(self.pdf_path)
             self.pdf_path = None
+        if self.archive_path:
+            close_archive_handler(self.archive_path)
+            self.archive_path = None
 
         self.folder_path = os.path.abspath(folder_path)
         discovered = []
@@ -539,8 +668,12 @@ class MainWindow(QMainWindow):
         if not is_pdf_file(resolved):
             return False
 
-        if self.pdf_path and self.pdf_path != resolved:
+        if self.archive_path or (self.pdf_path and self.pdf_path != resolved):
             self._image_pipeline.wait_for_idle()
+        if self.archive_path:
+            close_archive_handler(self.archive_path)
+            self.archive_path = None
+        if self.pdf_path and self.pdf_path != resolved:
             close_pdf_handler(self.pdf_path)
 
         try:
@@ -559,6 +692,7 @@ class MainWindow(QMainWindow):
             return False
 
         self.pdf_path = resolved
+        self.archive_path = None
         self.folder_path = os.path.dirname(resolved)
         self.image_list = [
             build_pdf_page_uri(resolved, i) for i in range(handler.page_count)
@@ -569,10 +703,13 @@ class MainWindow(QMainWindow):
         self.setMaximumSize(16777215, 16777215)
         self.resize(self.VIEWER_WIDTH, self.VIEWER_HEIGHT)
 
-        # PDF documents open by default in single page mode
-        self.viewer_mode = ViewerMode.SINGLE
         self._sync_comic_mode_state()
-        self._stack.setCurrentWidget(self.image_viewer)
+        target_widget = (
+            self.scroll_reader
+            if self.viewer_mode == ViewerMode.SCROLL
+            else self.image_viewer
+        )
+        self._stack.setCurrentWidget(target_widget)
 
         requested_index = max(0, min(start_page, len(self.image_list) - 1))
         self.current_index = requested_index
@@ -582,22 +719,88 @@ class MainWindow(QMainWindow):
         self.scroll_reader.set_images(self.image_list, start_index=requested_index)
         res = self._request_index(requested_index, force=True)
         self._hud.set_page_info(requested_index, len(self.image_list))
-        self._hud.set_mode(False)
+        self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
         self._hud.reposition(self.width(), self.height())
         self._hud.hide_immediately()
         return res
 
+    def open_archive(self, archive_path: str, start_page: int = 0) -> bool:
+        """Open a CBZ/CBR comic as a naturally sorted sequence of lazy pages."""
+        resolved = os.path.abspath(archive_path)
+        if not is_comic_archive_file(resolved):
+            return False
+
+        if self.pdf_path or (self.archive_path and self.archive_path != resolved):
+            self._image_pipeline.wait_for_idle()
+        if self.pdf_path:
+            close_pdf_handler(self.pdf_path)
+            self.pdf_path = None
+        if self.archive_path and self.archive_path != resolved:
+            close_archive_handler(self.archive_path)
+
+        try:
+            handler = get_archive_handler(resolved)
+        except Exception as error:
+            self._show_load_error(
+                resolved,
+                f"Could not open comic archive:\n{error}",
+            )
+            return False
+
+        if handler.page_count <= 0:
+            close_archive_handler(resolved)
+            self._show_load_error(
+                resolved,
+                "The comic archive does not contain any supported images.",
+            )
+            return False
+
+        self.archive_path = resolved
+        self.pdf_path = None
+        self.folder_path = os.path.dirname(resolved)
+        self.image_list = [
+            build_archive_page_uri(resolved, index)
+            for index in range(handler.page_count)
+        ]
+
+        self.setMinimumSize(320, 180)
+        self.setMaximumSize(16777215, 16777215)
+        self.resize(self.VIEWER_WIDTH, self.VIEWER_HEIGHT)
+
+        self._sync_comic_mode_state()
+        target_widget = (
+            self.scroll_reader
+            if self.viewer_mode == ViewerMode.SCROLL
+            else self.image_viewer
+        )
+        self._stack.setCurrentWidget(target_widget)
+
+        requested_index = max(0, min(start_page, len(self.image_list) - 1))
+        self.current_index = requested_index
+        self._requested_index = None
+        self._single_scroll_transition = None
+
+        self.scroll_reader.set_images(self.image_list, start_index=requested_index)
+        result = self._request_index(requested_index, force=True)
+        self._hud.set_page_info(requested_index, len(self.image_list))
+        self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
+        self._hud.reposition(self.width(), self.height())
+        self._hud.hide_immediately()
+        return result
+
     def load_image(self, image_path: str) -> bool:
-        """Load an image file, PDF document, or discover folder images."""
+        """Load an image, PDF, CBZ/CBR comic, or discover folder images."""
         resolved = os.path.abspath(image_path)
         if is_pdf_file(resolved):
             return self.open_pdf(resolved)
+        if is_comic_archive_file(resolved):
+            return self.open_archive(resolved)
         if os.path.isdir(resolved):
             return self.discover_images(resolved)
         return self.discover_images(os.path.dirname(resolved), initial_file=resolved)
 
     def open_path(self, target_path: str) -> bool:
-        """Open an image file, PDF file, or directory."""
+        """Open an image, PDF, comic archive, or directory."""
         return self.load_image(target_path)
 
     def load_current_image(self) -> bool:
@@ -615,11 +818,15 @@ class MainWindow(QMainWindow):
         return self._request_index(index, force=True)
 
     def _display_name(self, path: str) -> str:
-        """Format filename for title display, distinguishing PDF pages."""
+        """Format a filename for display, including virtual document pages."""
         pdf_info = parse_pdf_page_uri(path)
         if pdf_info is not None:
             pdf_file, page_idx = pdf_info
             return f"{os.path.basename(pdf_file)} (Page {page_idx + 1})"
+        archive_info = parse_archive_page_uri(path)
+        if archive_info is not None:
+            archive_file, page_idx = archive_info
+            return f"{os.path.basename(archive_file)} (Page {page_idx + 1})"
         return os.path.basename(path)
 
     def update_title(self):
@@ -1249,6 +1456,19 @@ class MainWindow(QMainWindow):
         )
         view_menu.addAction(self._double_spread_action)
 
+        self._maintain_ratios_action = QAction(
+            "Maintain ratios in scroll", self
+        )
+        self._maintain_ratios_action.setCheckable(True)
+        self._maintain_ratios_action.setChecked(False)
+        self._maintain_ratios_action.setToolTip(
+            "Keep relative native page dimensions in scroll mode; zoom scales all pages"
+        )
+        self._maintain_ratios_action.triggered.connect(
+            self._apply_scroll_ratio_option
+        )
+        view_menu.addAction(self._maintain_ratios_action)
+
         view_menu.addSeparator()
 
         zoom_in_action = QAction("Zoom &In", self)
@@ -1368,6 +1588,8 @@ class MainWindow(QMainWindow):
             return True
         if is_pdf_file(path):
             return True
+        if is_comic_archive_file(path):
+            return True
         ext = os.path.splitext(path)[1].lower()
         return ext in SUPPORTED_EXTENSIONS
 
@@ -1438,17 +1660,18 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def open_file_dialog(self):
-        """Show open file dialog for images and PDF files."""
+        """Show the open dialog for images, PDFs, CBZs, and CBRs."""
         filter_exts = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
         file_filter = (
-            f"Supported Files (*.pdf {filter_exts});;"
+            f"Supported Files (*.pdf *.cbz *.cbr {filter_exts});;"
+            f"Comic Archives (*.cbz *.cbr);;"
             f"PDF Documents (*.pdf);;"
             f"Images ({filter_exts});;"
             f"All Files (*)"
         )
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open Image or PDF Document",
+            "Open Image, PDF, or Comic Archive",
             self.folder_path or "",
             file_filter,
         )
@@ -1511,6 +1734,9 @@ class MainWindow(QMainWindow):
         if self.pdf_path:
             close_pdf_handler(self.pdf_path)
             self.pdf_path = None
+        if self.archive_path:
+            close_archive_handler(self.archive_path)
+            self.archive_path = None
         if self.isFullScreen() or self.isMaximized() or self.isMinimized():
             self.showNormal()
         self.menuBar().setVisible(True)
@@ -1608,11 +1834,15 @@ class MainWindow(QMainWindow):
         """Finish decoder work before releasing Qt and PDFium resources."""
         if self._shutdown_started:
             return
+        save_state(self._state_snapshot())
         self._shutdown_started = True
         self._image_pipeline.shutdown()
         if self.pdf_path:
             close_pdf_handler(self.pdf_path)
             self.pdf_path = None
+        if self.archive_path:
+            close_archive_handler(self.archive_path)
+            self.archive_path = None
 
     def closeEvent(self, event):
         """Clean up resources on window close."""

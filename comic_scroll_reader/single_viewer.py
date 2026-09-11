@@ -1,5 +1,6 @@
 """Single image viewer widget implementation using Qt6."""
 
+import logging
 from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRect, QSize, Qt, QTimer, pyqtSignal
@@ -15,6 +16,9 @@ from PyQt6.QtWidgets import QWidget
 
 from .input_controls import CommonViewerControls, MouseEventHandler
 from .pdf_handler import parse_pdf_page_uri
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImageViewerWidget(QWidget):
@@ -232,6 +236,12 @@ class ImageViewerWidget(QWidget):
                 self._sec_full_pixmap = None
             updated = True
         if updated:
+            logger.debug(
+                "Sharpen applied: view=single stage=refined-preview buffer=%dx%d source=%s",
+                pixmap.width(),
+                pixmap.height(),
+                image_path,
+            )
             self._prepare_frame()
             self.update()
 
@@ -247,8 +257,22 @@ class ImageViewerWidget(QWidget):
                 self._sec_full_pixmap = pixmap
                 updated = True
         if updated:
+            logger.debug(
+                "Sharpen applied: view=single stage=full-resolution buffer=%dx%d source=%s",
+                pixmap.width(),
+                pixmap.height(),
+                image_path,
+            )
             self._prepare_frame()
             self.update()
+        else:
+            logger.debug(
+                "Sharpen skipped: view=single stage=full-resolution "
+                "reason=not-larger-or-stale buffer=%dx%d source=%s",
+                pixmap.width(),
+                pixmap.height(),
+                image_path,
+            )
 
     def release_full_resolution(self) -> None:
         """Drop the large buffer while retaining the small transition preview."""

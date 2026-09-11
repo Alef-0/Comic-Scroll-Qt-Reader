@@ -1,3 +1,4 @@
 PyQt6>=6.5.0
 pypdfium2>=4.30.0
 pillow>=10.0.0
+rarfile>=4.5.0

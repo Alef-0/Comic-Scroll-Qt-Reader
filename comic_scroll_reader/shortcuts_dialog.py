@@ -49,7 +49,7 @@ class ShortcutsDialog(QDialog):
         (
             "FILES AND WINDOW",
             (
-                ("Ctrl + O", "Open an image or PDF"),
+                ("Ctrl + O", "Open an image, PDF, CBZ, or CBR"),
                 ("Ctrl + Shift + O", "Open a comic folder"),
                 ("Ctrl + W", "Close the current document"),
                 ("F11 / F", "Toggle fullscreen"),

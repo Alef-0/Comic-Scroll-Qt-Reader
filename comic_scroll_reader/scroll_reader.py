@@ -1,5 +1,6 @@
 """Continuous vertical scroll reader widget using Qt6."""
 
+import logging
 import math
 import os
 from typing import Dict, List, Optional, Set
@@ -18,9 +19,13 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QAbstractScrollArea
 
+from .archive_handler import get_archive_page_size, parse_archive_page_uri
 from .image_pipeline import MIB, DecodeResult, ImagePipeline
 from .input_controls import CommonViewerControls
 from .pdf_handler import get_pdf_page_size, parse_pdf_page_uri
+
+
+logger = logging.getLogger(__name__)
 
 
 class ScrollReaderWidget(QAbstractScrollArea):
@@ -102,6 +107,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._invert_page_order = False
         self._page_spacing = True
         self._detect_double_spreads = True
+        self._maintain_ratios = False
 
         # Common control handler emitting signals that activate viewer functions
         self._controls = CommonViewerControls(self)
@@ -168,6 +174,10 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def detect_double_spreads(self) -> bool:
         return self._detect_double_spreads
 
+    @property
+    def maintain_ratios(self) -> bool:
+        return self._maintain_ratios
+
     def set_layout_options(
         self,
         *,
@@ -175,6 +185,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         invert_page_order: Optional[bool] = None,
         page_spacing: Optional[bool] = None,
         detect_double_spreads: Optional[bool] = None,
+        maintain_ratios: Optional[bool] = None,
     ) -> None:
         """Update comic layout options while preserving the reading position."""
         anchor = self._capture_resize_anchor()
@@ -186,6 +197,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self._page_spacing = page_spacing
         if detect_double_spreads is not None:
             self._detect_double_spreads = detect_double_spreads
+        if maintain_ratios is not None:
+            self._maintain_ratios = maintain_ratios
 
         self._relayout()
         if anchor is not None:
@@ -384,6 +397,21 @@ class ScrollReaderWidget(QAbstractScrollArea):
             except Exception:
                 pass
 
+        archive_info = parse_archive_page_uri(path)
+        if archive_info is not None:
+            archive_path, page_idx = archive_info
+            try:
+                size = get_archive_page_size(archive_path, page_idx)
+                if size.isValid() and size.width() > 0 and size.height() > 0:
+                    self._image_sizes[path] = size
+                    return size
+            except Exception as error:
+                logger.debug(
+                    "Archive page size lookup failed: source=%s error=%s",
+                    path,
+                    error,
+                )
+
         reader = QImageReader(path)
         reader.setAutoTransform(True)
         size = reader.size()
@@ -433,6 +461,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self.horizontalScrollBar().setRange(0, 0)
 
     def _layout_single_pages(self, viewport_width: int, spacing: int) -> tuple[int, int]:
+        if self._maintain_ratios:
+            return self._layout_native_single_pages(viewport_width, spacing)
+
         target_width = max(50, int(round(viewport_width * self._zoom_factor)))
         content_x = max(0, (viewport_width - target_width) // 2)
         self._image_rects = []
@@ -451,6 +482,13 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def _layout_double_pages(
         self, viewport_width: int, viewport_height: int, spacing: int
     ) -> tuple[int, int]:
+        if self._maintain_ratios:
+            return self._layout_native_rows(
+                viewport_width,
+                QSize(viewport_width, viewport_height),
+                spacing,
+            )
+
         page_width = max(
             50,
             int(round(((viewport_width - spacing) / 2.0) * self._zoom_factor)),
@@ -500,6 +538,85 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._image_rects = rects
         total_height = max(0, current_y - spacing)
         return content_width, total_height
+
+    def _native_display_size(self, path: str) -> QSize:
+        """Scale a page from its native dimensions using only the shared zoom."""
+        source_size = self._get_source_size(path)
+        return QSize(
+            max(1, int(round(max(1, source_size.width()) * self._zoom_factor))),
+            max(1, int(round(max(1, source_size.height()) * self._zoom_factor))),
+        )
+
+    def _layout_native_single_pages(
+        self, viewport_width: int, spacing: int
+    ) -> tuple[int, int]:
+        sizes = [self._native_display_size(path) for path in self._image_list]
+        content_width = max((size.width() for size in sizes), default=0)
+        canvas_width = max(viewport_width, content_width)
+        current_y = 0
+        self._image_rects = []
+
+        for size in sizes:
+            page_x = (canvas_width - size.width()) // 2
+            self._image_rects.append(
+                QRect(page_x, current_y, size.width(), size.height())
+            )
+            current_y += size.height() + spacing
+
+        return canvas_width, max(0, current_y - spacing)
+
+    def _layout_native_rows(
+        self, viewport_width: int, viewport_size: QSize, spacing: int
+    ) -> tuple[int, int]:
+        rows = self.comic_rows(viewport_size)
+        row_sizes = []
+        for row in rows:
+            sizes = [
+                self._native_display_size(self._image_list[index]) for index in row
+            ]
+            row_width = sum(size.width() for size in sizes)
+            if len(sizes) > 1:
+                row_width += spacing * (len(sizes) - 1)
+            row_sizes.append((row, sizes, row_width))
+
+        content_width = max((item[2] for item in row_sizes), default=0)
+        canvas_width = max(viewport_width, content_width)
+        rects = [QRect() for _ in self._image_list]
+        current_y = 0
+
+        for row, sizes, row_width in row_sizes:
+            row_x = (canvas_width - row_width) // 2
+            if len(row) == 1:
+                size = sizes[0]
+                rects[row[0]] = QRect(
+                    row_x, current_y, size.width(), size.height()
+                )
+                row_height = size.height()
+            else:
+                first_index, second_index = row
+                first_size, second_size = sizes
+                left_index, left_size = first_index, first_size
+                right_index, right_size = second_index, second_size
+                if self._invert_page_order:
+                    left_index, right_index = right_index, left_index
+                    left_size, right_size = right_size, left_size
+                rects[left_index] = QRect(
+                    row_x,
+                    current_y,
+                    left_size.width(),
+                    left_size.height(),
+                )
+                rects[right_index] = QRect(
+                    row_x + left_size.width() + spacing,
+                    current_y,
+                    right_size.width(),
+                    right_size.height(),
+                )
+                row_height = max(first_size.height(), second_size.height())
+            current_y += row_height + spacing
+
+        self._image_rects = rects
+        return canvas_width, max(0, current_y - spacing)
 
     def _scaled_height(self, path: str, target_width: int) -> int:
         source_size = self._get_source_size(path)
@@ -956,8 +1073,22 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self._pixmaps[idx] = pixmap
             self._pixmap_bytes_used += self._pixmap_bytes(pixmap)
             self._decoded_bounds[idx] = fulfilled_bounds
+            logger.debug(
+                "Sharpen applied: view=scroll page=%d purpose=%s buffer=%dx%d source=%s",
+                idx + 1,
+                request.purpose,
+                result.image.width(),
+                result.image.height(),
+                request.path,
+            )
             visible_indices, wanted_indices = self._cache_windows()
             self._prune_pixmaps(visible_indices, wanted_indices)
+        else:
+            logger.debug(
+                "Sharpen skipped: view=scroll page=%d reason=smaller-than-current source=%s",
+                idx + 1,
+                request.path,
+            )
         self.viewport().update()
 
     def _on_image_failed(self, result: DecodeResult) -> None:

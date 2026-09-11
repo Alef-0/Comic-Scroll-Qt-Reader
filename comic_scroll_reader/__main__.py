@@ -2,6 +2,7 @@
 """Command-line entry point for Comic Scroll Reader."""
 
 import argparse
+import logging
 import os
 import signal
 import sys
@@ -22,15 +23,33 @@ def parse_arguments(args=None):
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         prog="comic-scroll-reader",
-        description=f"{APP_NAME} - View image folders and PDF documents in continuous-scroll or single-page mode."
+        description=(
+            f"{APP_NAME} - View image folders, PDF documents, and CBZ/CBR "
+            "comics in continuous-scroll or single-page mode."
+        ),
     )
     parser.add_argument(
         "image_path",
         nargs="?",
         default=None,
-        help="Optional path to an image file, PDF file, or directory containing images to open",
+        help="Optional path to an image, PDF, CBZ/CBR comic, or image directory to open",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print detailed image decoding and progressive sharpening messages",
     )
     return parser.parse_args(args)
+
+
+def configure_logging(debug: bool) -> None:
+    """Enable actionable pipeline diagnostics only when explicitly requested."""
+    if not debug:
+        return
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 def is_desktop_file_installed(app_id: str = "comic-scroll-reader") -> bool:
@@ -47,6 +66,8 @@ def is_desktop_file_installed(app_id: str = "comic-scroll-reader") -> bool:
 def main():
     """Main execution entry point."""
     args = parse_arguments()
+    env_debug = os.environ.get("COMIC_SCROLL_READER_DEBUG", "").casefold()
+    configure_logging(args.debug or env_debug in {"1", "true", "yes", "on"})
 
     resolved_path = None
     if args.image_path:

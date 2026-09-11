@@ -464,6 +464,14 @@ class TestMainWindowInterface(unittest.TestCase):
         )
         self.assertTrue(window._directional_pan_action.isChecked())
         self.assertTrue(window._double_spread_action.isChecked())
+        self.assertIn("Maintain ratios in scroll", view_actions)
+        self.assertFalse(window._maintain_ratios_action.isChecked())
+        comic_mode_actions = [
+            action.text()
+            for action in menubar.actions()[2].menu().actions()
+            if not action.isSeparator()
+        ]
+        self.assertNotIn("Maintain ratios in scroll", comic_mode_actions)
         window.deleteLater()
 
     def test_comic_mode_presets_coordinate_layout_and_hud(self):

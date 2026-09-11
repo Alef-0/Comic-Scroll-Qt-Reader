@@ -422,5 +422,6 @@ def test_main_window_open_pdf(qapp: QApplication, sample_pdf: str):
 
 def test_cli_parse_pdf():
     """Verify CLI argument parser accepts PDF paths."""
-    args = parse_arguments(["comic_issue_01.pdf"])
+    args = parse_arguments(["--debug", "comic_issue_01.pdf"])
     assert args.image_path == "comic_issue_01.pdf"
+    assert args.debug is True

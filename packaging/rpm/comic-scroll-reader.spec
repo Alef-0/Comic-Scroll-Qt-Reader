@@ -1,7 +1,7 @@
 Name:           comic-scroll-reader
 Version:        1.0.0
 Release:        1%{?dist}
-Summary:        Continuous scroll and single-page reader for comics, manga, and PDFs
+Summary:        Continuous scroll and single-page reader for comics, CBZ/CBR, manga, and PDFs
 License:        MIT
 URL:            https://github.com/Alef-0/Comic-Scroll-Qt-Reader
 BuildArch:      x86_64
@@ -11,7 +11,7 @@ Requires:       python3 >= 3.10, (python3-pyqt6 or python3-qt6)
 
 %description
 Comic Scroll Reader is a sleek, modern desktop viewer designed specifically
-for reading comic folders, webtoons, manga, and PDF documents with seamless
+for reading comic folders, CBZ/CBR books, webtoons, manga, and PDF documents with seamless
 continuous vertical scroll and classic single-page viewing modes.
 
 %install
@@ -27,6 +27,7 @@ mkdir -p %{buildroot}/usr/share/doc/%{name}
 cp -a %{_sourcedir}/comic_scroll_reader %{buildroot}/usr/lib/comic-scroll-reader/
 cp -a %{_sourcedir}/pypdfium2 %{buildroot}/usr/lib/comic-scroll-reader/
 cp -a %{_sourcedir}/pypdfium2_raw %{buildroot}/usr/lib/comic-scroll-reader/
+cp -a %{_sourcedir}/rarfile.py %{buildroot}/usr/lib/comic-scroll-reader/
 if [ -d %{_sourcedir}/pypdfium2_cfg ]; then
     cp -a %{_sourcedir}/pypdfium2_cfg %{buildroot}/usr/lib/comic-scroll-reader/
 fi

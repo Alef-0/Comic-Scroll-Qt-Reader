@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Hashable, Optional, Set
@@ -20,12 +22,15 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QImage, QImageReader
 
+from .archive_handler import decode_archive_page, parse_archive_page_uri
 from .pdf_handler import (
     get_file_path_for_stat,
     parse_pdf_page_uri,
     render_pdf_page,
 )
 
+
+logger = logging.getLogger(__name__)
 
 MIB = 1024 * 1024
 
@@ -189,6 +194,19 @@ class _DecodeWorker(QRunnable):
         self.signals = _WorkerSignals()
 
     def run(self) -> None:
+        started_at = time.perf_counter()
+        bounds_label = (
+            "full"
+            if self.request.bounds is None
+            else f"{self.request.bounds.width()}x{self.request.bounds.height()}"
+        )
+        logger.debug(
+            "Decode started: worker=%d purpose=%s bounds=%s source=%s",
+            self.worker_id,
+            self.request.purpose,
+            bounds_label,
+            self.request.path,
+        )
         pdf_info = parse_pdf_page_uri(self.request.path)
         if pdf_info is not None:
             pdf_path, page_idx = pdf_info
@@ -202,6 +220,41 @@ class _DecodeWorker(QRunnable):
                 )
             except RuntimeError:
                 pass
+            logger.debug(
+                "Decode finished: worker=%d type=pdf purpose=%s output=%dx%d "
+                "elapsed_ms=%.1f error=%s",
+                self.worker_id,
+                self.request.purpose,
+                image.width(),
+                image.height(),
+                (time.perf_counter() - started_at) * 1000,
+                error or "none",
+            )
+            return
+
+        archive_info = parse_archive_page_uri(self.request.path)
+        if archive_info is not None:
+            archive_path, page_idx = archive_info
+            image, source_size, error = decode_archive_page(
+                archive_path, page_idx, bounds=self.request.bounds
+            )
+            try:
+                self.signals.finished.emit(
+                    self.worker_id,
+                    DecodeResult(self.request, image, QSize(source_size), error),
+                )
+            except RuntimeError:
+                pass
+            logger.debug(
+                "Decode finished: worker=%d type=archive purpose=%s output=%dx%d "
+                "elapsed_ms=%.1f error=%s",
+                self.worker_id,
+                self.request.purpose,
+                image.width(),
+                image.height(),
+                (time.perf_counter() - started_at) * 1000,
+                error or "none",
+            )
             return
 
         reader = QImageReader(self.request.path)
@@ -247,6 +300,16 @@ class _DecodeWorker(QRunnable):
             )
         except RuntimeError:
             pass
+        logger.debug(
+            "Decode finished: worker=%d type=image purpose=%s output=%dx%d "
+            "elapsed_ms=%.1f error=%s",
+            self.worker_id,
+            self.request.purpose,
+            image.width(),
+            image.height(),
+            (time.perf_counter() - started_at) * 1000,
+            error or "none",
+        )
 
 
 class ImagePipeline(QObject):
@@ -354,7 +417,12 @@ class ImagePipeline(QObject):
         self, path: str, bounds: QSize, priority: int
     ) -> bool:
         """Raise a matching queued preview's priority when it becomes visible."""
-        stat_path = get_file_path_for_stat(path)
+        archive_info = parse_archive_page_uri(path)
+        stat_path = (
+            archive_info[0]
+            if archive_info is not None
+            else get_file_path_for_stat(path)
+        )
         try:
             stat_result = os.stat(stat_path)
         except OSError:
@@ -413,7 +481,12 @@ class ImagePipeline(QObject):
         if self._shutting_down:
             return
 
-        stat_path = get_file_path_for_stat(path)
+        archive_info = parse_archive_page_uri(path)
+        stat_path = (
+            archive_info[0]
+            if archive_info is not None
+            else get_file_path_for_stat(path)
+        )
         try:
             stat_result = os.stat(stat_path)
             signature = (stat_result.st_mtime_ns, stat_result.st_size)
@@ -438,6 +511,13 @@ class ImagePipeline(QObject):
                     path, signature, bounds
                 )
             if cached is not None:
+                logger.debug(
+                    "Decode cache hit: purpose=%s bounds=%dx%d source=%s",
+                    purpose,
+                    bounds.width(),
+                    bounds.height(),
+                    path,
+                )
                 result = DecodeResult(
                     request, cached.image, QSize(cached.source_size)
                 )
@@ -445,6 +525,11 @@ class ImagePipeline(QObject):
                 return
 
         if cache_key in self._inflight_waiters:
+            logger.debug(
+                "Decode joined in-flight work: purpose=%s source=%s",
+                purpose,
+                path,
+            )
             self._inflight_waiters[cache_key].append(request)
             self._promote_cache_key(
                 cache_key,
@@ -467,6 +552,13 @@ class ImagePipeline(QObject):
         worker.signals.finished.connect(
             self._on_finished, Qt.ConnectionType.QueuedConnection
         )
+        logger.debug(
+            "Decode queued: worker=%d purpose=%s priority=%d source=%s",
+            worker_id,
+            purpose,
+            priority,
+            path,
+        )
         worker_pool.start(worker, priority)
 
     def _on_finished(self, worker_id: int, result: DecodeResult) -> None:
@@ -480,6 +572,14 @@ class ImagePipeline(QObject):
         waiting_requests = self._inflight_waiters.pop(
             result.request.cache_key, [result.request]
         )
+        if not result.succeeded:
+            logger.debug(
+                "Decode result failed: worker=%d purpose=%s source=%s error=%s",
+                worker_id,
+                result.request.purpose,
+                result.request.path,
+                result.error,
+            )
 
         if (
             waiting_requests

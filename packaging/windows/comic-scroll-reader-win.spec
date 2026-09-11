@@ -21,9 +21,12 @@ hiddenimports = [
     'comic_scroll_reader.about_dialog',
     'comic_scroll_reader.welcome_widget',
     'comic_scroll_reader.image_pipeline',
+    'comic_scroll_reader.archive_handler',
     'comic_scroll_reader.pdf_handler',
     'comic_scroll_reader.input_controls',
     'comic_scroll_reader.resources',
+    'comic_scroll_reader.settings',
+    'rarfile',
 ]
 
 # Ensure pypdfium2 binary libraries (pdfium.dll) and data are bundled

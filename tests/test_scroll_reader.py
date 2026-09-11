@@ -336,6 +336,42 @@ class TestScrollReaderWidget(unittest.TestCase):
                 f"Image {i} width ({rect.width()}) does not match uniform width ({first_width})",
             )
 
+    def test_maintain_ratios_uses_native_relative_page_sizes(self):
+        """The optional scroll layout scales every native page by one zoom."""
+        self.widget.set_layout_options(maintain_ratios=True)
+
+        rects = self.widget.image_rects
+        self.assertEqual(
+            [(rect.width(), rect.height()) for rect in rects],
+            [(200, 400), (400, 200), (300, 300)],
+        )
+        self.assertEqual(rects[0].x() - rects[1].x(), 100)
+        self.assertEqual(rects[2].x() - rects[1].x(), 50)
+
+        self.widget.set_zoom(2.0)
+
+        zoomed_rects = self.widget.image_rects
+        self.assertEqual(
+            [(rect.width(), rect.height()) for rect in zoomed_rects],
+            [(400, 800), (800, 400), (600, 600)],
+        )
+
+    def test_maintain_ratios_preserves_sizes_in_double_page_rows(self):
+        self.widget.set_layout_options(
+            double_page=True,
+            detect_double_spreads=False,
+            maintain_ratios=True,
+        )
+
+        rects = self.widget.image_rects
+        self.assertEqual(
+            [(rect.width(), rect.height()) for rect in rects],
+            [(200, 400), (400, 200), (300, 300)],
+        )
+        self.assertGreater(rects[1].y(), rects[0].y())
+        self.assertEqual(rects[1].y(), rects[2].y())
+        self.assertLess(rects[1].x(), rects[2].x())
+
     def test_aspect_ratio_preservation(self):
         """Each image must strictly preserve its individual aspect ratio."""
         rects = self.widget.image_rects

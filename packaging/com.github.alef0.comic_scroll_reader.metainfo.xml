@@ -4,7 +4,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>Comic Scroll Reader</name>
-  <summary>Continuous scroll and single-page reader for comics, image folders, and PDFs</summary>
+  <summary>Continuous scroll and single-page reader for CBZ/CBR comics, image folders, and PDFs</summary>
   <description>
     <p>
       Comic Scroll Reader is a fast, purpose-built desktop reader designed specifically for comics, manga, webtoons, and image collections.
@@ -15,6 +15,7 @@
       <li>Single-page view with fit-to-width, fit-to-height, and smooth anchored zoom</li>
       <li>High-performance asynchronous image pipeline for instant decoding and low memory footprint</li>
       <li>Fast, on-demand PDF document rendering powered by Google PDFium</li>
+      <li>Lazy, naturally sorted CBZ and CBR comic archive decoding</li>
       <li>Comprehensive keyboard and mouse shortcuts, fullscreen mode, and auto-hiding HUD</li>
       <li>Folder and archive browsing with natural numerical sorting</li>
     </ul>
@@ -24,6 +25,8 @@
   <developer_name>Alef-0</developer_name>
   <provides>
     <binary>comic-scroll-reader</binary>
+    <mediatype>application/vnd.comicbook+zip</mediatype>
+    <mediatype>application/vnd.comicbook-rar</mediatype>
   </provides>
   <releases>
     <release version="1.0.0" date="2026-09-05">

@@ -43,6 +43,17 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
+; Register comic archives in Windows "Open with" without taking over defaults
+Root: HKCR; Subkey: ".cbz\OpenWithProgids"; ValueType: string; ValueName: "ComicScrollReader.cbz"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKCR; Subkey: "ComicScrollReader.cbz"; ValueType: string; ValueData: "CBZ Comic Book"; Flags: uninsdeletekey
+Root: HKCR; Subkey: "ComicScrollReader.cbz\DefaultIcon"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"",0"
+Root: HKCR; Subkey: "ComicScrollReader.cbz\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
+Root: HKCR; Subkey: ".cbr\OpenWithProgids"; ValueType: string; ValueName: "ComicScrollReader.cbr"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKCR; Subkey: "ComicScrollReader.cbr"; ValueType: string; ValueData: "CBR Comic Book"; Flags: uninsdeletekey
+Root: HKCR; Subkey: "ComicScrollReader.cbr\DefaultIcon"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"",0"
+Root: HKCR; Subkey: "ComicScrollReader.cbr\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
 ; Right-click directory context menu: "Open with Comic Scroll Reader"
 Root: HKCR; Subkey: "Directory\shell\ComicScrollReader"; ValueType: string; ValueData: "Open with Comic Scroll Reader"; Flags: uninsdeletekey
 Root: HKCR; Subkey: "Directory\shell\ComicScrollReader"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExeName}"""

@@ -56,7 +56,7 @@ EOF
 }
 
 ensure_dependencies() {
-    if ! "$PYTHON_BIN" -c "import pypdfium2, pypdfium2_raw" >/dev/null 2>&1; then
+    if ! "$PYTHON_BIN" -c "import pypdfium2, pypdfium2_raw, rarfile" >/dev/null 2>&1; then
         echo "Ensuring required dependencies are installed..."
         "$PYTHON_BIN" -m pip install -r "$PROJECT_ROOT/requirements.txt"
     fi
@@ -81,6 +81,7 @@ clean_build() {
 }
 
 build_standalone_bundle() {
+    ensure_dependencies
     ensure_pyinstaller
     local pyinstaller_dist="$BUILD_DIR/pyinstaller_dist"
     local pyinstaller_build="$BUILD_DIR/pyinstaller_build"
@@ -117,9 +118,11 @@ build_deb() {
     local pypdfium2_dir
     local pypdfium2_raw_dir
     local pypdfium2_cfg_dir
+    local rarfile_path
     pypdfium2_dir="$("$PYTHON_BIN" -c "import pypdfium2, os; print(os.path.dirname(pypdfium2.__file__))")"
     pypdfium2_raw_dir="$("$PYTHON_BIN" -c "import pypdfium2_raw, os; print(os.path.dirname(pypdfium2_raw.__file__))")"
     pypdfium2_cfg_dir="$("$PYTHON_BIN" -c "import pypdfium2_cfg, os; print(os.path.dirname(pypdfium2_cfg.__file__))" 2>/dev/null || true)"
+    rarfile_path="$("$PYTHON_BIN" -c "import rarfile; print(rarfile.__file__)")"
 
     local deb_pkg_name="comic-scroll-reader_${VERSION}_${DEB_ARCH}"
     local stage_dir="$BUILD_DIR/deb_stage/$deb_pkg_name"
@@ -135,10 +138,11 @@ build_deb() {
         "$stage_dir/usr/share/doc/comic-scroll-reader" \
         "$stage_dir/DEBIAN"
 
-    # Copy application files and vendored PDFium libraries
+    # Copy application files and vendored document-reader libraries
     cp -a "$PROJECT_ROOT/comic_scroll_reader" "$stage_dir/usr/lib/comic-scroll-reader/"
     cp -a "$pypdfium2_dir" "$stage_dir/usr/lib/comic-scroll-reader/"
     cp -a "$pypdfium2_raw_dir" "$stage_dir/usr/lib/comic-scroll-reader/"
+    cp -a "$rarfile_path" "$stage_dir/usr/lib/comic-scroll-reader/rarfile.py"
     if [ -n "$pypdfium2_cfg_dir" ] && [ -d "$pypdfium2_cfg_dir" ]; then
         cp -a "$pypdfium2_cfg_dir" "$stage_dir/usr/lib/comic-scroll-reader/"
     fi
@@ -254,9 +258,11 @@ build_rpm() {
     local pypdfium2_dir
     local pypdfium2_raw_dir
     local pypdfium2_cfg_dir
+    local rarfile_path
     pypdfium2_dir="$("$PYTHON_BIN" -c "import pypdfium2, os; print(os.path.dirname(pypdfium2.__file__))")"
     pypdfium2_raw_dir="$("$PYTHON_BIN" -c "import pypdfium2_raw, os; print(os.path.dirname(pypdfium2_raw.__file__))")"
     pypdfium2_cfg_dir="$("$PYTHON_BIN" -c "import pypdfium2_cfg, os; print(os.path.dirname(pypdfium2_cfg.__file__))" 2>/dev/null || true)"
+    rarfile_path="$("$PYTHON_BIN" -c "import rarfile; print(rarfile.__file__)")"
 
     local rpm_topdir="$BUILD_DIR/rpm_stage"
     local rpm_sources="$rpm_topdir/SOURCES"
@@ -266,6 +272,7 @@ build_rpm() {
     cp -a "$PROJECT_ROOT/comic_scroll_reader" "$rpm_sources/"
     cp -a "$pypdfium2_dir" "$rpm_sources/"
     cp -a "$pypdfium2_raw_dir" "$rpm_sources/"
+    cp -a "$rarfile_path" "$rpm_sources/rarfile.py"
     if [ -n "$pypdfium2_cfg_dir" ] && [ -d "$pypdfium2_cfg_dir" ]; then
         cp -a "$pypdfium2_cfg_dir" "$rpm_sources/"
     fi

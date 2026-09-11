@@ -5,14 +5,14 @@
 <h1 align="center">Comic Scroll Reader</h1>
 
 <p align="center">
-  <b>Desktop reader for comic folders, webtoons, manga, and PDF documents.</b>
+  <b>Desktop reader for comic folders, CBZ/CBR books, webtoons, manga, and PDF documents.</b>
 </p>
 
 ---
 
 ## 📖 Overview
 
-**Comic Scroll Reader** is a fast, distraction-free desktop application crafted specifically for comic lovers, webtoon readers, and manga fans. Unlike generic image viewers that only show isolated files, Comic Scroll Reader seamlessly handles image folders and PDF documents in both **Single Page mode** (default) and **Continuous Vertical Scroll mode**.
+**Comic Scroll Reader** is a fast, distraction-free desktop application crafted specifically for comic lovers, webtoon readers, and manga fans. Unlike generic image viewers that only show isolated files, Comic Scroll Reader seamlessly handles image folders, CBZ/CBR comic archives, and PDF documents in both **Single Page mode** (default) and **Continuous Vertical Scroll mode**.
 
 Powered by **Python 3**, **PyQt6**, and **Google PDFium**, it combines instant startup, anchored zooming, asynchronous multi-threaded decoding, and memory-bounded rendering to deliver a silky-smooth reading experience.
 
@@ -35,6 +35,7 @@ Powered by **Python 3**, **PyQt6**, and **Google PDFium**, it combines instant s
   - High-fidelity on-demand page rasterization with bounded memory caching.
 - 📁 **Smart Folder & Archive Browsing**:
   - Open any folder containing images directly.
+  - Read `.cbz` and `.cbr` books lazily without extracting the full archive to disk.
   - Natural numerical sorting (`1, 2, 10` instead of `1, 10, 2`).
 - 🖱️ **Fluid Navigation & Anchored Zoom**:
   - Zoom directly to your mouse cursor (`Ctrl + Wheel` or `Ctrl + +/-`).
@@ -45,13 +46,13 @@ Powered by **Python 3**, **PyQt6**, and **Google PDFium**, it combines instant s
   - Fades out automatically to keep your screen distraction-free (press `H` to toggle).
 - 💻 **Cross-Platform Installers**:
   - Native installers available for **Linux** (`.deb` & `.rpm`), **Windows** (`.exe` setup), and **macOS** (`.dmg`).
-  - Complete desktop integration: file associations (PDFs and images) and folder context menu ("Open with Comic Scroll Reader").
+  - Complete desktop integration: file associations (CBZ/CBR, PDFs, and images) and folder context menu ("Open with Comic Scroll Reader").
 
 ---
 
 ## 🚀 Installation
 
-Pre-built standalone installers are available for Linux, Windows, and macOS. They contain all necessary dependencies (including Qt6 and Google PDFium) with zero manual Python environment configuration required.
+Pre-built standalone installers are available for Linux, Windows, and macOS. They contain the Python runtime dependencies, including Qt6, Google PDFium, and `rarfile`. CBR decompression additionally requires a supported extractor in `PATH`; `unrar` is recommended. CBZ support is fully self-contained.
 
 ### 🐧 Linux
 
@@ -97,6 +98,8 @@ If you prefer running directly in Python:
    ```bash
    pip install -r requirements.txt
    ```
+
+   CBR decompression also needs a supported command-line backend in `PATH`. `unrar` is recommended; `unar`, `7zip`, and `bsdtar` are supported alternatives. CBZ files need no external extractor.
 
 4. **Launch the reader**:
    ```bash
@@ -183,7 +186,7 @@ Comic Scroll Reader is designed to be operated entirely via keyboard and mouse w
 
 | Shortcut | Action |
 | :--- | :--- |
-| <kbd>Ctrl</kbd> + <kbd>O</kbd> | Open an image file or PDF document |
+| <kbd>Ctrl</kbd> + <kbd>O</kbd> | Open an image, PDF, CBZ, or CBR file |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> | Open a comic / manga folder |
 | <kbd>Ctrl</kbd> + <kbd>W</kbd> | Close current document and return to welcome screen |
 | <kbd>F11</kbd> / <kbd>F</kbd> | Toggle distraction-free Fullscreen |
@@ -204,9 +207,14 @@ comic-scroll-reader /path/to/manga_chapter_01/
 # Open a PDF document
 comic-scroll-reader /path/to/comic_book.pdf
 
+# Open a CBZ or CBR comic book
+comic-scroll-reader /path/to/comic_book.cbz
+
 # Open a specific image
 comic-scroll-reader /path/to/cover.webp
 ```
+
+For decoding and progressive-sharpening diagnostics, launch with `--debug` or set `COMIC_SCROLL_READER_DEBUG=1`.
 
 ---
 
@@ -215,6 +223,7 @@ comic-scroll-reader /path/to/cover.webp
 | Category | Formats / Extensions |
 | :--- | :--- |
 | **Comic Folders** | Any directory containing supported image formats (sorted numerically) |
+| **Comic Archives** | `.cbz`, `.cbr` (naturally sorted, decoded on demand) |
 | **PDF Documents** | `.pdf` (vector & raster, Google PDFium accelerated) |
 | **Raster Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.avif`, `.tiff` |
 
@@ -228,6 +237,7 @@ comic-scroll-reader /path/to/cover.webp
   - [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) - GUI Toolkit
   - [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) - Google PDFium Python bindings
   - [Google PDFium](https://pdfium.googlesource.com/pdfium/) - Open-source PDF engine
+  - [rarfile](https://rarfile.readthedocs.io/) - RAR archive access for CBR books
 
 ---
 
