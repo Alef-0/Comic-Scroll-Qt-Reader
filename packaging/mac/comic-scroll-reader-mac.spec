@@ -104,8 +104,8 @@ app = BUNDLE(
         'CFBundleDisplayName': 'Comic Scroll Reader',
         'CFBundleName': 'Comic Scroll Reader',
         'CFBundleIdentifier': 'com.github.alef0.comic-scroll-reader',
-        'CFBundleVersion': '1.0.0',
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleVersion': '1.1.0',
+        'CFBundleShortVersionString': '1.1.0',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '11.0',
         'CFBundleDocumentTypes': [

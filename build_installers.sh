@@ -21,7 +21,7 @@ else
     exit 1
 fi
 
-VERSION="$("$PYTHON_BIN" -c "import comic_scroll_reader; print(comic_scroll_reader.__version__)" 2>/dev/null || echo "1.0.0")"
+VERSION="$("$PYTHON_BIN" -c "import comic_scroll_reader; print(comic_scroll_reader.__version__)" 2>/dev/null || echo "1.1.0")"
 ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 case "$ARCH" in
     x86_64) DEB_ARCH="amd64"; RPM_ARCH="x86_64" ;;
@@ -161,7 +161,8 @@ build_deb() {
     # Compute size & control
     local installed_size
     installed_size="$(du -sk "$stage_dir/usr" | awk '{print $1}')"
-    sed -e "s/@ARCH@/$DEB_ARCH/g" \
+    sed -e "s/@VERSION@/$VERSION/g" \
+        -e "s/@ARCH@/$DEB_ARCH/g" \
         -e "s/@INSTALLED_SIZE@/$installed_size/g" \
         "$PACKAGING_DIR/control.in" > "$stage_dir/DEBIAN/control"
 
@@ -221,7 +222,8 @@ build_deb_standalone() {
 
     local installed_size
     installed_size="$(du -sk "$stage_dir/usr" | awk '{print $1}')"
-    sed -e "s/@ARCH@/$DEB_ARCH/g" \
+    sed -e "s/@VERSION@/$VERSION/g" \
+        -e "s/@ARCH@/$DEB_ARCH/g" \
         -e "s/@INSTALLED_SIZE@/$installed_size/g" \
         -e "s/Depends:.*/Depends: libc6 (>= 2.34), libgl1, libx11-6, libxcb1, libxkbcommon0/g" \
         "$PACKAGING_DIR/control.in" > "$stage_dir/DEBIAN/control"
@@ -283,7 +285,9 @@ build_rpm() {
     cp "$PROJECT_ROOT/comic_scroll_reader/assets/csr_app_icon.png" "$rpm_sources/"
     cp "$PACKAGING_DIR/com.github.alef0.comic_scroll_reader.metainfo.xml" "$rpm_sources/"
     cp "$PACKAGING_DIR/copyright" "$rpm_sources/"
-    cp "$PACKAGING_DIR/rpm/comic-scroll-reader.spec" "$rpm_topdir/SPECS/"
+    sed -e "s/@VERSION@/$VERSION/g" \
+        -e "s/^Version:.*/Version:        $VERSION/" \
+        "$PACKAGING_DIR/rpm/comic-scroll-reader.spec" > "$rpm_topdir/SPECS/comic-scroll-reader.spec"
 
     rpmbuild -bb \
         --define "_topdir $rpm_topdir" \

@@ -1,5 +1,5 @@
 Name:           comic-scroll-reader
-Version:        1.0.0
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Continuous scroll and single-page reader for comics, CBZ/CBR, manga, and PDFs
 License:        MIT

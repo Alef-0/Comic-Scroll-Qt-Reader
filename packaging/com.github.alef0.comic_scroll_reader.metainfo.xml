@@ -29,6 +29,11 @@
     <mediatype>application/vnd.comicbook-rar</mediatype>
   </provides>
   <releases>
+    <release version="1.1.0" date="2026-09-11">
+      <description>
+        <p>Version 1.1.0 introduces adaptive HUD page thumbnails, page deletion and reordering controls, full comic archive (CBZ/CBR) reading, and persistent reader state.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-09-05">
       <description>
         <p>Initial stable 1.0 release of Comic Scroll Reader with full PDF and image folder reading support.</p>

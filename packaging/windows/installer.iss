@@ -2,7 +2,7 @@
 ; Compatible with Inno Setup 6+
 
 #define MyAppName "Comic Scroll Reader"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Alef-0"
 #define MyAppURL "https://github.com/Alef-0/Comic-Scroll-Qt-Reader"
 #define MyAppExeName "comic-scroll-reader.exe"

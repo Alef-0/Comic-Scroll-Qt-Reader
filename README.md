@@ -70,10 +70,10 @@ Pre-built standalone installers are available for Linux, Windows, and macOS. The
 #### Debian / Ubuntu / Linux Mint / Pop!_OS (`.deb`)
 ```bash
 # Install via apt (resolves system dependencies automatically)
-sudo apt install ./comic-scroll-reader_1.0.0_amd64.deb
+sudo apt install ./comic-scroll-reader_1.1.0_amd64.deb
 
 # Or install via dpkg
-sudo dpkg -i comic-scroll-reader_1.0.0_amd64.deb
+sudo dpkg -i comic-scroll-reader_1.1.0_amd64.deb
 ```
 Launch from your desktop application menu or via terminal: `comic-scroll-reader`.  
 To uninstall: `sudo apt remove comic-scroll-reader`
@@ -81,10 +81,10 @@ To uninstall: `sudo apt remove comic-scroll-reader`
 #### Fedora / RHEL / CentOS / openSUSE (`.rpm`)
 ```bash
 # Install via dnf
-sudo dnf install ./comic-scroll-reader-1.0.0-1.x86_64.rpm
+sudo dnf install ./comic-scroll-reader-1.1.0-1.x86_64.rpm
 
 # Or install via rpm
-sudo rpm -i comic-scroll-reader-1.0.0-1.x86_64.rpm
+sudo rpm -i comic-scroll-reader-1.1.0-1.x86_64.rpm
 ```
 
 ---
@@ -175,7 +175,7 @@ make clean
 ### Windows & macOS Native Builds
 - **Windows**: Run `packaging\windows\build_windows.bat` or `packaging\windows\build_windows.ps1` (compiles standalone executable and Inno Setup installer).
 - **macOS**: Run `packaging/mac/build_mac.sh` (compiles `.app` bundle and generates `.dmg` disk image).
-- **GitHub Actions**: Push a tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`) to trigger `.github/workflows/release.yml`, which builds all 4 installers on their native cloud runners (`ubuntu-latest`, `windows-latest`, `macos-latest`) and uploads them to your GitHub Release!
+- **GitHub Actions**: Push a tag (e.g. `git tag v1.1.0 && git push origin v1.1.0`) to trigger `.github/workflows/release.yml`, which builds all 4 installers on their native cloud runners (`ubuntu-latest`, `windows-latest`, `macos-latest`) and uploads them to your GitHub Release!
 
 ---
 
