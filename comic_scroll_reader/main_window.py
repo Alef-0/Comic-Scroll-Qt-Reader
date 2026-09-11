@@ -59,6 +59,7 @@ class ViewerMode(Enum):
 
 
 class ComicMode(Enum):
+    DEFAULT = "default"
     COMICS = "comics"
     MANGA = "manga"
     WEBTOON = "webtoon"
@@ -190,7 +191,7 @@ class MainWindow(QMainWindow):
         self._hud.zoom_reset_clicked.connect(self._reset_zoom)
         self._hud.fullscreen_toggled.connect(self.toggle_fullscreen)
         self._hud.comic_mode_selected.connect(self.set_comic_mode)
-        self._hud.set_comic_mode(ComicMode.CUSTOM.value)
+        self._hud.set_comic_mode(ComicMode.DEFAULT.value)
         self._hud.hide_immediately()
 
         # Keyboard event handler
@@ -236,7 +237,7 @@ class MainWindow(QMainWindow):
         self.setMouseTracking(True)
 
         # Native Menu Bar
-        self.comic_mode = ComicMode.CUSTOM
+        self.comic_mode = ComicMode.DEFAULT
         self._init_menu_bar()
         self._sync_comic_mode_state()
 
@@ -248,7 +249,7 @@ class MainWindow(QMainWindow):
         self._requested_index: Optional[int] = None
         self._spread_pending_results: dict[str, DecodeResult] = {}
         self._request_generation = 0
-        self._full_request_paths: set[str] = set()
+        self._full_request_keys: set[tuple[str, int, int]] = set()
         self._refine_request_keys: set[tuple[str, int, int]] = set()
         self._error_dialog: Optional[QMessageBox] = None
         self._single_scroll_transition: Optional[
@@ -264,9 +265,18 @@ class MainWindow(QMainWindow):
             self.update_title()
 
     def set_mode(self, mode: ViewerMode) -> None:
-        """Switch between Single Image mode and Scroll Reader mode, synchronizing current image."""
+        """Switch reader modes while synchronizing the current page and view."""
         if self.viewer_mode == mode:
             return
+
+        single_page_view = None
+        if (
+            mode == ViewerMode.SCROLL
+            and 0 <= self.current_index < len(self.image_list)
+        ):
+            single_page_view = self.image_viewer.page_view_snapshot(
+                self.image_list[self.current_index]
+            )
 
         self._single_scroll_transition = None
         self.viewer_mode = mode
@@ -283,7 +293,7 @@ class MainWindow(QMainWindow):
             # Sync active index from single image viewer to scroll reader
             self._request_generation += 1
             self._requested_index = None
-            self._full_request_paths.clear()
+            self._full_request_keys.clear()
             self._refine_request_keys.clear()
             self._spread_pending_results.clear()
             self._image_pipeline.cancel_queued(
@@ -299,6 +309,11 @@ class MainWindow(QMainWindow):
             self.scroll_reader.setFocus()
             if 0 <= self.current_index < len(self.image_list):
                 self.scroll_reader.scroll_to_index(self.current_index)
+                if single_page_view is not None:
+                    displayed_size, focus = single_page_view
+                    self.scroll_reader.restore_page_view(
+                        self.current_index, displayed_size, focus
+                    )
 
         self.update_title()
         self._sync_comic_mode_state()
@@ -318,6 +333,7 @@ class MainWindow(QMainWindow):
             return
 
         presets = {
+            ComicMode.DEFAULT: (False, False, True, True),
             ComicMode.COMICS: (True, False, True, True),
             ComicMode.MANGA: (True, True, True, True),
             ComicMode.WEBTOON: (False, False, False, False),
@@ -340,12 +356,12 @@ class MainWindow(QMainWindow):
             invert_page_order=invert_order,
             page_spacing=page_spacing,
         )
-        if selected == ComicMode.WEBTOON:
-            self.scroll_reader.reset_zoom()
-            self.set_mode(ViewerMode.SCROLL)
-
         self._sync_comic_mode_state()
-        if self.viewer_mode == ViewerMode.SINGLE and self.image_list and self.current_index >= 0:
+        if (
+            self.viewer_mode == ViewerMode.SINGLE
+            and self.image_list
+            and self.current_index >= 0
+        ):
             self._request_index(self.current_index, force=True)
 
     def _resolve_matching_comic_mode(self) -> ComicMode:
@@ -357,7 +373,9 @@ class MainWindow(QMainWindow):
         inv = self._invert_pages_action.isChecked()
         sp = self._page_spacing_action.isChecked()
         ds = self._double_spread_action.isChecked()
-        is_scroll = (self.viewer_mode == ViewerMode.SCROLL)
+        # Presets describe layout only; the selected reader view is independent.
+        if not dp and not inv and sp and ds:
+            return ComicMode.DEFAULT
 
         # Comic Mode: Dual page, No change in mode. Activate Spacing and Double Spread, disable invert
         if dp and not inv and sp and ds:
@@ -367,8 +385,8 @@ class MainWindow(QMainWindow):
         if dp and inv and sp and ds:
             return ComicMode.MANGA
 
-        # Webtoon: Scroll, disable spacing, disable the rest.
-        if is_scroll and not dp and not inv and not sp and not ds:
+        # Webtoon: disable spacing and the remaining page-layout options.
+        if not dp and not inv and not sp and not ds:
             return ComicMode.WEBTOON
 
         return ComicMode.CUSTOM
@@ -411,56 +429,12 @@ class MainWindow(QMainWindow):
             self._request_index(self.current_index, force=True)
 
     def _double_spread_indices(self) -> Set[int]:
-        if not self._double_spread_action.isChecked() or not self.image_list:
-            return set()
-        widths_by_index = {
-            index: self.scroll_reader._get_source_size(path).width()
-            for index, path in enumerate(self.image_list)
-        }
-        widths = [width for width in widths_by_index.values() if width > 0]
-        if not widths:
-            return set()
-        average_width = sum(widths) / len(widths)
-        return {
-            index
-            for index, width in widths_by_index.items()
-            if width > average_width * 1.5
-        }
+        return self.scroll_reader.horizontal_page_indices(self.image_viewer.size())
 
     def _compute_spreads(self) -> List[tuple[int, ...]]:
         if not self.image_list:
             return []
-        if not self._double_page_action.isChecked():
-            return [(i,) for i in range(len(self.image_list))]
-
-        spreads: List[tuple[int, ...]] = []
-        spread_indices = self._double_spread_indices()
-
-        # Cover (index 0) is always alone
-        spreads.append((0,))
-
-        index = 1
-        n = len(self.image_list)
-        while index < n:
-            if index in spread_indices:
-                spreads.append((index,))
-                index += 1
-                continue
-
-            next_index = index + 1
-            can_pair = (
-                next_index < n
-                and next_index not in spread_indices
-            )
-            if not can_pair:
-                spreads.append((index,))
-                index += 1
-                continue
-
-            spreads.append((index, next_index))
-            index += 2
-
-        return spreads
+        return self.scroll_reader.comic_rows(self.image_viewer.size())
 
     def _get_spread_for_index(self, index: int) -> tuple[int, ...]:
         if not (0 <= index < len(self.image_list)):
@@ -901,7 +875,7 @@ class MainWindow(QMainWindow):
         self._request_generation += 1
         self._requested_index = base_index
         self._spread_pending_results.clear()
-        self._full_request_paths.clear()
+        self._full_request_keys.clear()
         self._refine_request_keys.clear()
         self._image_pipeline.cancel_queued(
             {
@@ -911,7 +885,6 @@ class MainWindow(QMainWindow):
                 "prefetch-preview",
             }
         )
-        self.image_viewer.release_full_resolution()
         self.update_title()
 
         bounds = self.image_viewer.preview_bounds()
@@ -1024,9 +997,14 @@ class MainWindow(QMainWindow):
             self._refine_request_keys.discard(key)
             self.image_viewer.set_refined_preview_pixmap(pixmap, request.path)
         elif request.purpose == "current-full":
-            self._full_request_paths.discard(request.path)
+            bounds = request.bounds
+            if bounds is not None:
+                self._full_request_keys.discard(
+                    (request.path, bounds.width(), bounds.height())
+                )
             if self.image_viewer.zoom_factor > 1.0:
                 self.image_viewer.set_full_resolution_pixmap(pixmap, request.path)
+                self._prefetch_neighbours()
 
     def _on_image_failed(self, result: DecodeResult) -> None:
         request = result.request
@@ -1044,7 +1022,11 @@ class MainWindow(QMainWindow):
             self._refine_request_keys.discard(key)
             return
         if request.purpose == "current-full":
-            self._full_request_paths.discard(request.path)
+            bounds = request.bounds
+            if bounds is not None:
+                self._full_request_keys.discard(
+                    (request.path, bounds.width(), bounds.height())
+                )
             return
         if request.purpose != "current-preview" or self._requested_index is None:
             return
@@ -1082,22 +1064,26 @@ class MainWindow(QMainWindow):
             )
 
     def _request_full_resolution(self) -> None:
-        if self._full_request_paths:
-            return
         if not (0 <= self.current_index < len(self.image_list)):
-            return
-        bounds = self.image_viewer.detail_bounds()
-        if not bounds.isValid():
             return
         spread = (
             self._get_spread_for_index(self.current_index)
             if self.viewer_mode == ViewerMode.SINGLE
             else (self.current_index,)
         )
-        self._full_request_paths = {self.image_list[idx] for idx in spread}
         for idx in spread:
+            path = self.image_list[idx]
+            if not self.image_viewer.detail_needed(path):
+                continue
+            bounds = self.image_viewer.detail_bounds(path)
+            if not bounds.isValid():
+                continue
+            key = (path, bounds.width(), bounds.height())
+            if key in self._full_request_keys:
+                continue
+            self._full_request_keys.add(key)
             self._image_pipeline.request_preview(
-                self.image_list[idx],
+                path,
                 bounds,
                 self._request_generation,
                 purpose="current-full",
@@ -1111,13 +1097,15 @@ class MainWindow(QMainWindow):
             spreads = self._compute_spreads()
             curr_spread = self._get_spread_for_index(self.current_index)
             neighbour_indices = set(curr_spread)
+            prefetch_plan: List[tuple[int, int]] = []
             if curr_spread in spreads:
                 pos = spreads.index(curr_spread)
-                if pos > 0:
-                    neighbour_indices.update(spreads[pos - 1])
                 if pos < len(spreads) - 1:
                     neighbour_indices.update(spreads[pos + 1])
-            current_spread_set = set(curr_spread)
+                    prefetch_plan.extend((index, 0) for index in spreads[pos + 1])
+                if pos > 0:
+                    neighbour_indices.update(spreads[pos - 1])
+                    prefetch_plan.extend((index, -1) for index in spreads[pos - 1])
         else:
             neighbour_indices = {
                 index
@@ -1129,16 +1117,24 @@ class MainWindow(QMainWindow):
                 if 0 <= index < len(self.image_list)
             }
             current_spread_set = {self.current_index}
+            prefetch_plan = [
+                (index, 0)
+                for index in sorted(neighbour_indices - current_spread_set)
+            ]
         retained_paths = {self.image_list[index] for index in neighbour_indices}
         self._image_pipeline.retain_preview_paths(retained_paths)
         bounds = self.image_viewer.preview_bounds()
-        for index in sorted(neighbour_indices - current_spread_set):
+        if self.image_viewer.zoom_factor > 1.0:
+            detail_bounds = self.image_viewer.detail_bounds()
+            if detail_bounds.isValid():
+                bounds = detail_bounds
+        for index, priority in prefetch_plan:
             self._image_pipeline.request_preview(
                 self.image_list[index],
                 bounds,
                 self._request_generation,
                 purpose="prefetch-preview",
-                priority=0,
+                priority=priority,
             )
 
     def _show_load_error(self, path: str, detail: str) -> None:
@@ -1211,6 +1207,16 @@ class MainWindow(QMainWindow):
         mode_scroll_action.triggered.connect(lambda: self.set_mode(ViewerMode.SCROLL))
         view_menu.addAction(mode_scroll_action)
 
+        self._directional_pan_action = QAction(
+            "Arrow / WASD Keys Pan Zoomed Images", self
+        )
+        self._directional_pan_action.setCheckable(True)
+        self._directional_pan_action.setChecked(True)
+        self._directional_pan_action.setToolTip(
+            "Pan zoomed images with direction keys, changing pages at an edge"
+        )
+        view_menu.addAction(self._directional_pan_action)
+
         view_menu.addSeparator()
 
         self._double_page_action = QAction("Double Page", self)
@@ -1230,12 +1236,13 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._page_spacing_action)
 
         self._double_spread_action = QAction(
-            "⚠ Default Double Spread Detection", self
+            "Detect Horizontal Spreads (≥65% Screen)", self
         )
         self._double_spread_action.setCheckable(True)
         self._double_spread_action.setChecked(True)
         self._double_spread_action.setToolTip(
-            "Show pages wider than 1.5× the folder average as a full row"
+            "Show pages covering at least 65% of the screen at fit-height "
+            "as a full row"
         )
         self._double_spread_action.triggered.connect(
             self._apply_custom_layout_options
@@ -1277,9 +1284,10 @@ class MainWindow(QMainWindow):
         self._comic_mode_group.setExclusive(True)
         self._comic_actions = {}
         for label, mode in (
+            ("Default - Original Layout", ComicMode.DEFAULT),
             ("Comics - Double Page, Left to Right", ComicMode.COMICS),
             ("Manga - Double Page, Right to Left", ComicMode.MANGA),
-            ("Webtoon - Continuous, No Spacing", ComicMode.WEBTOON),
+            ("Webtoon - No Spacing", ComicMode.WEBTOON),
         ):
             action = QAction(label, self)
             action.setCheckable(True)
@@ -1295,13 +1303,11 @@ class MainWindow(QMainWindow):
         # Navigate Menu
         nav_menu = menubar.addMenu("&Navigate")
 
-        next_action = QAction("&Next Page", self)
-        next_action.setShortcut("Right")
+        next_action = QAction("&Next Page\tRight / Down / D / S", self)
         next_action.triggered.connect(self.next_image)
         nav_menu.addAction(next_action)
 
-        prev_action = QAction("&Previous Page", self)
-        prev_action.setShortcut("Left")
+        prev_action = QAction("&Previous Page\tLeft / Up / A / W", self)
         prev_action.triggered.connect(self.prev_image)
         nav_menu.addAction(prev_action)
 
@@ -1546,11 +1552,57 @@ class MainWindow(QMainWindow):
         if event.key() == Qt.Key.Key_Escape:
             self.close()
             return
+        if self._handle_directional_key(event):
+            return
         if not self._keyboard_handler.handle_key_press(event):
             if self.viewer_mode == ViewerMode.SCROLL and self.image_list:
                 self.scroll_reader.keyPressEvent(event)
             else:
                 super().keyPressEvent(event)
+
+    def _handle_directional_key(self, event: QKeyEvent) -> bool:
+        """Route arrows/WASD to scrolling or optional single-page panning."""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            return False
+
+        directions = {
+            Qt.Key.Key_Left: (-1, 0),
+            Qt.Key.Key_A: (-1, 0),
+            Qt.Key.Key_Right: (1, 0),
+            Qt.Key.Key_D: (1, 0),
+            Qt.Key.Key_Up: (0, -1),
+            Qt.Key.Key_W: (0, -1),
+            Qt.Key.Key_Down: (0, 1),
+            Qt.Key.Key_S: (0, 1),
+        }
+        direction = directions.get(event.key())
+        if direction is None or not self.image_list:
+            return False
+
+        horizontal, vertical = direction
+        if self.viewer_mode == ViewerMode.SCROLL:
+            reading_direction = horizontal or vertical
+            scrollbar = self.scroll_reader.verticalScrollBar()
+            scrollbar.setValue(
+                scrollbar.value() + reading_direction * self.scroll_reader.SCROLL_STEP
+            )
+            event.accept()
+            return True
+
+        if (
+            self._directional_pan_action.isChecked()
+            and self.image_viewer.pan_in_direction(horizontal, vertical)
+        ):
+            event.accept()
+            return True
+        if (
+            self._directional_pan_action.isChecked()
+            and self.image_viewer.zoom_factor > 1.0
+        ):
+            self.image_viewer.request_page_scroll(horizontal or vertical)
+            event.accept()
+            return True
+        return False
 
     def shutdown(self) -> None:
         """Finish decoder work before releasing Qt and PDFium resources."""

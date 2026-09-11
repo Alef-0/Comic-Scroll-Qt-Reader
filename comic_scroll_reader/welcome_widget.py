@@ -155,7 +155,7 @@ class WelcomeWidget(QWidget):
             "<b style='color: #ffffff;'>Esc</b> Close<br/>"
             "<b style='color: #ffffff;'>Drag</b> Pan &nbsp;•&nbsp; "
             "<b style='color: #ffffff;'>Ctrl+Wheel</b> Zoom &nbsp;•&nbsp; "
-            "<b style='color: #ffffff;'>Arrows / Wheel</b> Navigate<br/>"
+            "<b style='color: #ffffff;'>Arrows / WASD / Wheel</b> Navigate<br/>"
             "<b style='color: #ffffff;'>Ctrl+G</b> Go to page &nbsp;•&nbsp; "
             "<b style='color: #ffffff;'>F1</b> All shortcuts"
         )

@@ -197,7 +197,7 @@ class TestViewerHud(unittest.TestCase):
     def test_mode_and_zoom_display(self):
         self.assertEqual(
             self.hud.btn_comic_mode.text(),
-            ViewerHud.COMIC_MODE_LABELS["custom"],
+            ViewerHud.COMIC_MODE_LABELS["default"],
         )
 
         self.hud.set_mode(is_scroll=True)
@@ -213,13 +213,13 @@ class TestViewerHud(unittest.TestCase):
         selector_width = self.hud.btn_comic_mode.width()
         self.assertEqual(self.hud._comic_menu.width(), selector_width)
 
-        for mode in ("comics", "manga", "webtoon", "custom"):
+        for mode in ("default", "comics", "manga", "webtoon", "custom"):
             self.hud.set_comic_mode(mode)
             self.assertEqual(self.hud.btn_comic_mode.width(), selector_width)
 
         self.assertEqual(
             [action.text() for action in self.hud._comic_menu.actions()],
-            ["📚 Comics", "📖 Manga", "📱 Webtoon"],
+            ["⚙ Default", "📚 Comics", "📖 Manga", "📱 Webtoon"],
         )
 
     def test_fullscreen_display(self):
@@ -296,7 +296,7 @@ class TestViewerHud(unittest.TestCase):
         selected = []
         self.hud.comic_mode_selected.connect(selected.append)
 
-        self.hud.btn_comic_mode.menu().actions()[1].trigger()
+        self.hud.btn_comic_mode.menu().actions()[2].trigger()
 
         self.assertEqual(selected, ["manga"])
 
@@ -462,16 +462,27 @@ class TestMainWindowInterface(unittest.TestCase):
             view_actions.index("Single &Page Mode"),
             view_actions.index("Continuous &Scroll Mode"),
         )
+        self.assertTrue(window._directional_pan_action.isChecked())
         self.assertTrue(window._double_spread_action.isChecked())
         window.deleteLater()
 
     def test_comic_mode_presets_coordinate_layout_and_hud(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertEqual(window.comic_mode, ComicMode.DEFAULT)
+
+        window.set_mode(ViewerMode.SCROLL)
+        window.set_comic_mode(ComicMode.DEFAULT)
+        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
+        self.assertFalse(window.scroll_reader.double_page)
+        self.assertFalse(window.scroll_reader.invert_page_order)
+        self.assertTrue(window.scroll_reader.page_spacing)
+        self.assertTrue(window.scroll_reader.detect_double_spreads)
+        self.assertIn("Default", window._hud.btn_comic_mode.text())
 
         # Comic Mode: Dual page, No change in mode. Activate Spacing and Double Spread, disable invert
         window.set_comic_mode(ComicMode.COMICS)
-        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
         self.assertTrue(window.scroll_reader.double_page)
         self.assertFalse(window.scroll_reader.invert_page_order)
         self.assertTrue(window.scroll_reader.page_spacing)
@@ -481,7 +492,7 @@ class TestMainWindowInterface(unittest.TestCase):
 
         # Manga Mode: Dual Page. No change in mode. Activate Spacing and Double Spread, enable invert
         window.set_comic_mode(ComicMode.MANGA)
-        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
+        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
         self.assertTrue(window.scroll_reader.double_page)
         self.assertTrue(window.scroll_reader.invert_page_order)
         self.assertTrue(window.scroll_reader.page_spacing)
@@ -494,24 +505,25 @@ class TestMainWindowInterface(unittest.TestCase):
         self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
         self.assertEqual(window.comic_mode, ComicMode.MANGA)
 
-        # Webtoon Mode: Scroll, disable spacing, disable the rest
+        # Webtoon changes layout only and preserves the current reader view.
         window.set_mode(ViewerMode.SINGLE)
         window.scroll_reader.zoom_in()
         window.set_comic_mode(ComicMode.WEBTOON)
-        self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
+        self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
         self.assertFalse(window.scroll_reader.double_page)
         self.assertFalse(window.scroll_reader.invert_page_order)
         self.assertFalse(window.scroll_reader.page_spacing)
         self.assertFalse(window.scroll_reader.detect_double_spreads)
-        self.assertEqual(window.scroll_reader.zoom_factor, 1.0)
+        self.assertGreater(window.scroll_reader.zoom_factor, 1.0)
         self.assertEqual(window.comic_mode, ComicMode.WEBTOON)
         self.assertIn("Webtoon", window._hud.btn_comic_mode.text())
+        window.shutdown()
         window.deleteLater()
 
     def test_comic_mode_dynamic_matching_on_option_changes(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assertEqual(window.viewer_mode, ViewerMode.SINGLE)
-        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
+        self.assertEqual(window.comic_mode, ComicMode.DEFAULT)
 
         # Initially: double_page=False, invert=False, spacing=True, spread=True
         # Enabling double page creates config: True, False, True, True -> matches Comics!
@@ -537,26 +549,27 @@ class TestMainWindowInterface(unittest.TestCase):
         self.assertFalse(window._comic_actions[ComicMode.WEBTOON].isChecked())
         self.assertIn("Custom", window._hud.btn_comic_mode.text())
 
-        # Disable all options while in Single mode -> remains Custom (Webtoon requires Scroll mode)
+        # Disabling all layout options matches Webtoon in either reader view.
         window._double_page_action.setChecked(False)
         window._invert_pages_action.setChecked(False)
         window._page_spacing_action.setChecked(False)
         window._double_spread_action.setChecked(False)
         window._apply_custom_layout_options()
-        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
+        self.assertEqual(window.comic_mode, ComicMode.WEBTOON)
 
-        # Switching to Scroll mode with all options disabled -> matches Webtoon!
+        # Switching reader views keeps the matched layout preset unchanged.
         window.set_mode(ViewerMode.SCROLL)
         self.assertEqual(window.comic_mode, ComicMode.WEBTOON)
         self.assertTrue(window._comic_actions[ComicMode.WEBTOON].isChecked())
         self.assertIn("Webtoon", window._hud.btn_comic_mode.text())
 
-        # Switching back to Single mode while in Webtoon config -> becomes Custom!
+        # Switching back also preserves the preset.
         window.set_mode(ViewerMode.SINGLE)
-        self.assertEqual(window.comic_mode, ComicMode.CUSTOM)
-        self.assertFalse(window._comic_actions[ComicMode.WEBTOON].isChecked())
-        self.assertIn("Custom", window._hud.btn_comic_mode.text())
+        self.assertEqual(window.comic_mode, ComicMode.WEBTOON)
+        self.assertTrue(window._comic_actions[ComicMode.WEBTOON].isChecked())
+        self.assertIn("Webtoon", window._hud.btn_comic_mode.text())
 
+        window.shutdown()
         window.deleteLater()
 
     def test_toggle_fullscreen(self):

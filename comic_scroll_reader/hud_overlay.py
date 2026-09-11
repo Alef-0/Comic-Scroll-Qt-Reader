@@ -41,6 +41,7 @@ class ViewerHud(QWidget):
     FADE_DURATION_MS = 350
     ACTIVATION_MARGIN = 28
     COMIC_MODE_LABELS = {
+        "default": "⚙ Default",
         "comics": "📚 Comics",
         "manga": "📖 Manga",
         "webtoon": "📱 Webtoon",
@@ -71,6 +72,8 @@ class ViewerHud(QWidget):
         self._hide_timer.timeout.connect(self._auto_hide)
 
         self._init_ui()
+        self._refresh_layout_geometry()
+        QTimer.singleShot(0, self._refresh_layout_geometry)
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -132,7 +135,7 @@ class ViewerHud(QWidget):
 
         # Navigation: Next
         self.btn_next = QPushButton("▶", self.pill)
-        self.btn_next.setToolTip("Next page (Right/Down/Space)")
+        self.btn_next.setToolTip("Next page (Right/Down/D/S at a page edge)")
         self.btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_next.clicked.connect(self.next_clicked.emit)
         pill_layout.addWidget(self.btn_next)
@@ -151,7 +154,7 @@ class ViewerHud(QWidget):
         pill_layout.addWidget(self._make_separator())
 
         self.btn_comic_mode = QToolButton(self.pill)
-        self.btn_comic_mode.setText(self.COMIC_MODE_LABELS["custom"])
+        self.btn_comic_mode.setText(self.COMIC_MODE_LABELS["default"])
         self.btn_comic_mode.setToolTip("Choose a comic reading layout")
         self.btn_comic_mode.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_comic_mode.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -162,7 +165,7 @@ class ViewerHud(QWidget):
             "QMenu::item { padding: 6px 24px 6px 20px; }"
             "QMenu::item:selected { background-color: #4a90e2; color: #fff; }"
         )
-        for mode in ("comics", "manga", "webtoon"):
+        for mode in ("default", "comics", "manga", "webtoon"):
             action = self._comic_menu.addAction(self.COMIC_MODE_LABELS[mode])
             action.triggered.connect(
                 lambda _checked=False, selected=mode: self.comic_mode_selected.emit(
@@ -276,7 +279,7 @@ class ViewerHud(QWidget):
         self.btn_comic_mode.setText(
             self.COMIC_MODE_LABELS.get(mode, self.COMIC_MODE_LABELS["custom"])
         )
-        self.adjustSize()
+        self._refresh_layout_geometry()
 
     def _reserve_comic_mode_width(self) -> None:
         """Keep the selector and its popup stable at the widest choice width."""
@@ -292,9 +295,20 @@ class ViewerHud(QWidget):
         self.btn_comic_mode.setFixedWidth(selector_width)
         self._comic_menu.setFixedWidth(selector_width)
 
+    def _refresh_layout_geometry(self) -> None:
+        """Polish and activate the initial HUD layout before it is displayed."""
+        self.ensurePolished()
+        self.pill.ensurePolished()
+        self._reserve_comic_mode_width()
+        for layout in (self.pill.layout(), self.layout()):
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+        self.adjustSize()
+
     def reposition(self, parent_width: int, parent_height: int):
         """Center the HUD horizontally near the bottom of the parent window."""
-        self.adjustSize()
+        self._refresh_layout_geometry()
         w = self.sizeHint().width()
         h = self.sizeHint().height()
         x = (parent_width - w) // 2

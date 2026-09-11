@@ -22,8 +22,12 @@ class ShortcutsDialog(QDialog):
             "READING",
             (
                 ("1 / 2", "Single page / continuous scroll"),
-                ("Right / Down / Space", "Next page"),
-                ("Left / Up / Backspace", "Previous page"),
+                (
+                    "Arrows / WASD",
+                    "Pan when zoomed; cross page edges without losing position",
+                ),
+                ("Space / Page Down", "Next page"),
+                ("Backspace / Page Up", "Previous page"),
                 ("Home / End", "First / last page"),
                 ("Ctrl + G", "Go to a page"),
                 ("Right click", "Toggle reader view"),

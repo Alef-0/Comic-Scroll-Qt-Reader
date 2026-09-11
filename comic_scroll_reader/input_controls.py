@@ -163,6 +163,8 @@ class CommonViewerControls(QObject):
             elif key in (
                 Qt.Key.Key_Right,
                 Qt.Key.Key_Down,
+                Qt.Key.Key_D,
+                Qt.Key.Key_S,
                 Qt.Key.Key_PageDown,
                 Qt.Key.Key_Space,
             ):
@@ -171,6 +173,8 @@ class CommonViewerControls(QObject):
             elif key in (
                 Qt.Key.Key_Left,
                 Qt.Key.Key_Up,
+                Qt.Key.Key_A,
+                Qt.Key.Key_W,
                 Qt.Key.Key_PageUp,
                 Qt.Key.Key_Backspace,
             ):
@@ -273,6 +277,8 @@ class KeyboardEventHandler:
             if key in (
                 Qt.Key.Key_Right,
                 Qt.Key.Key_Down,
+                Qt.Key.Key_D,
+                Qt.Key.Key_S,
                 Qt.Key.Key_PageDown,
                 Qt.Key.Key_Space,
             ):
@@ -282,6 +288,8 @@ class KeyboardEventHandler:
             elif key in (
                 Qt.Key.Key_Left,
                 Qt.Key.Key_Up,
+                Qt.Key.Key_A,
+                Qt.Key.Key_W,
                 Qt.Key.Key_PageUp,
                 Qt.Key.Key_Backspace,
             ):

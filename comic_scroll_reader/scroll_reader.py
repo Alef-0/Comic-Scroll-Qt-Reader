@@ -51,6 +51,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
     PIXMAP_CACHE_BYTES = 64 * MIB
     BASE_PIXMAP_CACHE_BYTES = 32 * MIB
     BASE_PREVIEW_MAX_WIDTH = 128
+    HORIZONTAL_FIT_WIDTH_RATIO = 0.65
 
     def __init__(self, parent=None, pipeline: Optional[ImagePipeline] = None):
         super().__init__(parent)
@@ -277,6 +278,45 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._update_visible_images()
         self.viewport().update()
 
+    def restore_page_view(
+        self, index: int, displayed_size: QSize, focus: QPointF
+    ) -> None:
+        """Match a single-page scale and centred page point in scroll mode."""
+        if (
+            not 0 <= index < len(self._image_rects)
+            or not displayed_size.isValid()
+        ):
+            return
+
+        # Scrollbar visibility can change the viewport width after relayout.
+        # Recalculate against the resulting geometry until the scale settles.
+        for _ in range(3):
+            current_rect = self._image_rects[index]
+            if current_rect.width() <= 0:
+                return
+            width_ratio = displayed_size.width() / current_rect.width()
+            if abs(width_ratio - 1.0) <= 0.01:
+                break
+            self.set_zoom(self._zoom_factor * width_ratio)
+
+        rect = self._image_rects[index]
+        target_x = (
+            rect.x()
+            + focus.x() * rect.width()
+            - self.viewport().width() / 2.0
+        )
+        target_y = (
+            rect.y()
+            + focus.y() * rect.height()
+            - self.viewport().height() / 2.0
+        )
+        self.horizontalScrollBar().setValue(int(round(target_x)))
+        self.verticalScrollBar().setValue(int(round(target_y)))
+        self._current_visible_index = index
+        self.visible_image_changed.emit(index)
+        self._update_visible_images()
+        self.viewport().update()
+
     def set_zoom(self, zoom_factor: float, anchor_pos: Optional[QPointF] = None) -> None:
         """Set zoom factor, preserving anchor position stationary in viewport."""
         new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom_factor))
@@ -372,7 +412,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         spacing = self.SPACING if self._page_spacing else 0
         if self._double_page:
             total_content_w, total_content_h = self._layout_double_pages(
-                vp_w, spacing
+                vp_w, vp_h, spacing
             )
         else:
             total_content_w, total_content_h = self._layout_single_pages(
@@ -408,7 +448,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
         total_height = max(0, current_y - spacing)
         return target_width, total_height
 
-    def _layout_double_pages(self, viewport_width: int, spacing: int) -> tuple[int, int]:
+    def _layout_double_pages(
+        self, viewport_width: int, viewport_height: int, spacing: int
+    ) -> tuple[int, int]:
         page_width = max(
             50,
             int(round(((viewport_width - spacing) / 2.0) * self._zoom_factor)),
@@ -416,43 +458,28 @@ class ScrollReaderWidget(QAbstractScrollArea):
         content_width = page_width * 2 + spacing
         content_x = max(0, (viewport_width - content_width) // 2)
         rects = [QRect() for _ in self._image_list]
-        spread_indices = self._double_spread_indices()
+        viewport_size = QSize(viewport_width, viewport_height)
+        horizontal_indices = self.horizontal_page_indices(viewport_size)
         current_y = 0
 
-        # Comic covers are always a centred, normal-sized page of their own.
-        cover_height = self._scaled_height(self._image_list[0], page_width)
-        cover_x = content_x + (content_width - page_width) // 2
-        rects[0] = QRect(cover_x, current_y, page_width, cover_height)
-        current_y += cover_height + spacing
-
-        index = 1
-        while index < len(self._image_list):
-            if index in spread_indices:
-                spread_height = self._scaled_height(
-                    self._image_list[index], content_width
+        for row in self.comic_rows(viewport_size):
+            if len(row) == 1:
+                index = row[0]
+                target_width = (
+                    content_width if index in horizontal_indices else page_width
                 )
+                page_height = self._scaled_height(
+                    self._image_list[index], target_width
+                )
+                page_x = content_x + (content_width - target_width) // 2
                 rects[index] = QRect(
-                    content_x, current_y, content_width, spread_height
+                    page_x, current_y, target_width, page_height
                 )
-                current_y += spread_height + spacing
-                index += 1
+                current_y += page_height + spacing
                 continue
 
-            next_index = index + 1
-            can_pair = (
-                next_index < len(self._image_list)
-                and next_index not in spread_indices
-            )
+            index, next_index = row
             first_height = self._scaled_height(self._image_list[index], page_width)
-            if not can_pair:
-                single_x = content_x + (content_width - page_width) // 2
-                rects[index] = QRect(
-                    single_x, current_y, page_width, first_height
-                )
-                current_y += first_height + spacing
-                index += 1
-                continue
-
             second_height = self._scaled_height(
                 self._image_list[next_index], page_width
             )
@@ -469,7 +496,6 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 second_x, current_y, page_width, second_height
             )
             current_y += max(first_height, second_height) + spacing
-            index += 2
 
         self._image_rects = rects
         total_height = max(0, current_y - spacing)
@@ -481,22 +507,76 @@ class ScrollReaderWidget(QAbstractScrollArea):
         source_height = max(1, source_size.height())
         return max(1, int(round(target_width * source_height / source_width)))
 
-    def _double_spread_indices(self) -> Set[int]:
+    def _normalized_viewport_size(
+        self, viewport_size: Optional[QSize] = None
+    ) -> QSize:
+        size = QSize(viewport_size) if viewport_size is not None else self.viewport().size()
+        width = size.width() if size.width() > 0 else max(1, self.width())
+        height = size.height() if size.height() > 0 else max(1, self.height())
+        return QSize(width, height)
+
+    def _fit_height_width(self, index: int, viewport_size: QSize) -> float:
+        source_size = self._get_source_size(self._image_list[index])
+        return (
+            viewport_size.height()
+            * max(1, source_size.width())
+            / max(1, source_size.height())
+        )
+
+    def horizontal_page_indices(
+        self, viewport_size: Optional[QSize] = None
+    ) -> Set[int]:
+        """Return pages covering at least 65% width when fitted to viewport height."""
         if not self._detect_double_spreads or not self._image_list:
             return set()
-        widths = [
-            self._get_source_size(path).width()
-            for path in self._image_list
-            if self._get_source_size(path).width() > 0
-        ]
-        if not widths:
-            return set()
-        average_width = sum(widths) / len(widths)
+        size = self._normalized_viewport_size(viewport_size)
+        threshold = size.width() * self.HORIZONTAL_FIT_WIDTH_RATIO
         return {
             index
-            for index, path in enumerate(self._image_list)
-            if self._get_source_size(path).width() > average_width * 1.5
+            for index in range(len(self._image_list))
+            if self._fit_height_width(index, size) >= threshold
         }
+
+    def comic_rows(
+        self, viewport_size: Optional[QSize] = None
+    ) -> List[tuple[int, ...]]:
+        """Group comic pages into height-fit rows containing at most two pages."""
+        if not self._image_list:
+            return []
+        if not self._double_page:
+            return [(index,) for index in range(len(self._image_list))]
+
+        size = self._normalized_viewport_size(viewport_size)
+        horizontal_indices = self.horizontal_page_indices(size)
+        rows: List[tuple[int, ...]] = [(0,)]
+        index = 1
+        while index < len(self._image_list):
+            if index in horizontal_indices:
+                rows.append((index,))
+                index += 1
+                continue
+
+            next_index = index + 1
+            can_pair = (
+                next_index < len(self._image_list)
+                and next_index not in horizontal_indices
+                and (
+                    not self._detect_double_spreads
+                    or self._fit_height_width(index, size)
+                    + self._fit_height_width(next_index, size)
+                    <= size.width()
+                )
+            )
+            if can_pair:
+                rows.append((index, next_index))
+                index += 2
+            else:
+                rows.append((index,))
+                index += 1
+        return rows
+
+    def _double_spread_indices(self) -> Set[int]:
+        return self.horizontal_page_indices()
 
     def _capture_resize_anchor(
         self,
@@ -1057,13 +1137,23 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
         # Navigation keys (without Ctrl)
         if not is_ctrl:
-            if key in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+            if key in (
+                Qt.Key.Key_Down,
+                Qt.Key.Key_Right,
+                Qt.Key.Key_S,
+                Qt.Key.Key_D,
+            ):
                 self.verticalScrollBar().setValue(
                     self.verticalScrollBar().value() + self.SCROLL_STEP
                 )
                 event.accept()
                 return
-            elif key in (Qt.Key.Key_Up, Qt.Key.Key_Left):
+            elif key in (
+                Qt.Key.Key_Up,
+                Qt.Key.Key_Left,
+                Qt.Key.Key_W,
+                Qt.Key.Key_A,
+            ):
                 self.verticalScrollBar().setValue(
                     self.verticalScrollBar().value() - self.SCROLL_STEP
                 )

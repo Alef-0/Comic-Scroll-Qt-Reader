@@ -312,6 +312,8 @@ class TestScrollReaderWidget(unittest.TestCase):
         self.widget.set_images(self.image_paths, start_index=0)
 
     def tearDown(self):
+        if self.widget._owns_pipeline:
+            self.widget._pipeline.shutdown()
         self.widget.deleteLater()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
@@ -363,7 +365,9 @@ class TestScrollReaderWidget(unittest.TestCase):
             )
 
     def test_double_page_keeps_cover_alone_and_pairs_following_pages(self):
-        self.widget.set_layout_options(double_page=True)
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=False
+        )
         rects = self.widget.image_rects
 
         self.assertEqual(rects[0].width(), rects[1].width())
@@ -377,7 +381,9 @@ class TestScrollReaderWidget(unittest.TestCase):
 
     def test_inverted_double_page_places_first_page_of_pair_on_right(self):
         self.widget.set_layout_options(
-            double_page=True, invert_page_order=True
+            double_page=True,
+            invert_page_order=True,
+            detect_double_spreads=False,
         )
         rects = self.widget.image_rects
 
@@ -416,6 +422,48 @@ class TestScrollReaderWidget(unittest.TestCase):
             rects[4].width(),
             rects[3].width() * 2 + ScrollReaderWidget.SPACING,
         )
+
+    def test_horizontal_detection_uses_fit_height_screen_coverage(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(1000, 2000), (1000, 800), (130, 150)]
+        ):
+            path = os.path.join(self.temp_dir, f"ratio_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("green"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True
+        )
+        self.widget.set_images(paths)
+
+        self.assertEqual(
+            self.widget.horizontal_page_indices(QSize(800, 600)),
+            {1, 2},
+        )
+
+    def test_comic_rows_pair_only_pages_that_fit_height_together(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(100, 150), (400, 500), (400, 500)]
+        ):
+            path = os.path.join(self.temp_dir, f"fit_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("yellow"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True
+        )
+        self.widget.set_images(paths)
+
+        rows = self.widget.comic_rows(QSize(800, 600))
+
+        self.assertEqual(rows, [(0,), (1,), (2,)])
+        self.assertTrue(all(len(row) <= 2 for row in rows))
 
     def test_scroll_to_index(self):
         """scroll_to_index positions the vertical scrollbar at the image's top."""
@@ -565,7 +613,9 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
         self.assertIn("page2.png", window.windowTitle())
         window.set_mode(ViewerMode.SCROLL)
         rects = window.scroll_reader.image_rects
-        self.assertEqual(window.scroll_reader.verticalScrollBar().value(), rects[1].y())
+        scroll_y = window.scroll_reader.verticalScrollBar().value()
+        self.assertLessEqual(rects[1].y(), scroll_y)
+        self.assertLessEqual(scroll_y, rects[1].bottom())
         window.deleteLater()
 
     def test_toggle_mode_via_keys_1_and_2(self):
@@ -625,7 +675,9 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
         self.assertEqual(window.viewer_mode, ViewerMode.SCROLL)
         self.assertEqual(window.scroll_reader.current_visible_index(), 1)
         rects = window.scroll_reader.image_rects
-        self.assertEqual(window.scroll_reader.verticalScrollBar().value(), rects[1].y())
+        scroll_y = window.scroll_reader.verticalScrollBar().value()
+        self.assertLessEqual(rects[1].y(), scroll_y)
+        self.assertLessEqual(scroll_y, rects[1].bottom())
 
         # Scroll to page10 (index 2) in scroll reader
         window.scroll_reader.scroll_to_index(2)
@@ -638,6 +690,39 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
         self.assertEqual(window.current_index, 2)
         self.assertIn("page10.png", window.windowTitle())
 
+        window.deleteLater()
+
+    def test_wasd_and_arrows_share_scroll_mode_movement(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_mode(ViewerMode.SCROLL)
+        window.scroll_reader.zoom_in()
+        scrollbar = window.scroll_reader.verticalScrollBar()
+
+        for key in (Qt.Key.Key_Down, Qt.Key.Key_Right, Qt.Key.Key_S, Qt.Key.Key_D):
+            scrollbar.setValue(0)
+            window.keyPressEvent(
+                QKeyEvent(
+                    QKeyEvent.Type.KeyPress,
+                    key,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+            )
+            self.assertGreater(scrollbar.value(), 0)
+
+        for key in (Qt.Key.Key_Up, Qt.Key.Key_Left, Qt.Key.Key_W, Qt.Key.Key_A):
+            scrollbar.setValue(scrollbar.maximum())
+            previous = scrollbar.value()
+            window.keyPressEvent(
+                QKeyEvent(
+                    QKeyEvent.Type.KeyPress,
+                    key,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+            )
+            self.assertLess(scrollbar.value(), previous)
+
+        window.shutdown()
         window.deleteLater()
 
 

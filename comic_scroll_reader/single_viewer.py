@@ -14,6 +14,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QWidget
 
 from .input_controls import CommonViewerControls, MouseEventHandler
+from .pdf_handler import parse_pdf_page_uri
 
 
 class ImageViewerWidget(QWidget):
@@ -35,6 +36,7 @@ class ImageViewerWidget(QWidget):
     MAX_ZOOM = 50.0
     QUALITY_DELAY_MS = 100
     WHEEL_SCROLL_PIXELS = 80.0
+    KEY_PAN_PIXELS = 80.0
     DETAIL_BUFFER_BYTES = 64 * 1024 * 1024
 
     def __init__(self, parent=None):
@@ -50,6 +52,7 @@ class ImageViewerWidget(QWidget):
         self._zoom_factor: float = 1.0
         self._pan_offset: QPointF = QPointF(0.0, 0.0)
         self._interactive_transform = False
+        self._prepared_frame: Optional[QPixmap] = None
 
         self._quality_timer = QTimer(self)
         self._quality_timer.setSingleShot(True)
@@ -136,6 +139,7 @@ class ImageViewerWidget(QWidget):
             self._invert_page_order = invert_page_order
         if page_spacing is not None:
             self._page_spacing = page_spacing
+        self._prepare_frame()
         self.update()
 
     def is_spread(self) -> bool:
@@ -178,6 +182,7 @@ class ImageViewerWidget(QWidget):
         else:
             self._clamp_pan_offset()
             self._update_pan_cursor()
+            self._prepare_frame()
             self.update()
 
     def set_spread_preview(
@@ -210,6 +215,7 @@ class ImageViewerWidget(QWidget):
         else:
             self._clamp_pan_offset()
             self._update_pan_cursor()
+            self._prepare_frame()
             self.update()
 
     def set_refined_preview_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
@@ -226,24 +232,29 @@ class ImageViewerWidget(QWidget):
                 self._sec_full_pixmap = None
             updated = True
         if updated:
+            self._prepare_frame()
             self.update()
 
     def set_full_resolution_pixmap(self, pixmap: QPixmap, image_path: str) -> None:
         """Install full pixels for detailed zoom without changing view geometry."""
         updated = False
         if image_path == self._image_path:
-            self._full_pixmap = pixmap
-            updated = True
+            if not self._pixmap_covers(self._full_pixmap, pixmap.size()):
+                self._full_pixmap = pixmap
+                updated = True
         elif image_path == self._sec_image_path:
-            self._sec_full_pixmap = pixmap
-            updated = True
+            if not self._pixmap_covers(self._sec_full_pixmap, pixmap.size()):
+                self._sec_full_pixmap = pixmap
+                updated = True
         if updated:
+            self._prepare_frame()
             self.update()
 
     def release_full_resolution(self) -> None:
         """Drop the large buffer while retaining the small transition preview."""
         self._full_pixmap = None
         self._sec_full_pixmap = None
+        self._prepare_frame()
         self.update()
 
     def _clear_secondary_page(self) -> None:
@@ -261,6 +272,7 @@ class ImageViewerWidget(QWidget):
         self._image_path = None
         self._clear_secondary_page()
         self._quality_timer.stop()
+        self._prepared_frame = None
         self.update()
 
     def clear(self):
@@ -271,6 +283,7 @@ class ImageViewerWidget(QWidget):
         self._image_path = None
         self._clear_secondary_page()
         self._quality_timer.stop()
+        self._prepared_frame = None
         self.reset_view()
 
     def reset_view(self):
@@ -280,6 +293,7 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = None
         self._sec_full_pixmap = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._prepare_frame()
         self.update()
         self.zoom_changed.emit(self._zoom_factor)
         self._schedule_quality_update()
@@ -298,6 +312,47 @@ class ImageViewerWidget(QWidget):
         self._begin_interaction()
         self.update()
 
+    def pan_in_direction(self, horizontal: int, vertical: int) -> bool:
+        """Pan the viewport one keyboard step, returning whether it moved."""
+        if self._zoom_factor <= 1.0 or not self._can_pan():
+            return False
+
+        previous_offset = QPointF(self._pan_offset)
+        self.pan_by(
+            -horizontal * self.KEY_PAN_PIXELS,
+            -vertical * self.KEY_PAN_PIXELS,
+        )
+        return self._pan_offset != previous_offset
+
+    def request_page_scroll(self, direction: int) -> None:
+        """Cross a page edge while retaining zoom and horizontal position."""
+        limits = self._pan_limits()
+        horizontal_ratio = (
+            self._pan_offset.x() / limits.x() if limits.x() > 0.0 else 0.0
+        )
+        self.page_scroll_requested.emit(
+            1 if direction > 0 else -1,
+            self._zoom_factor,
+            horizontal_ratio,
+        )
+
+    def page_view_snapshot(
+        self, image_path: str
+    ) -> Optional[tuple[QSize, QPointF]]:
+        """Capture displayed page size and the page point at viewport centre."""
+        page_state = self._page_render_state(image_path)
+        if page_state is None:
+            return None
+
+        _source_size, rect, _preview, _detail = page_state
+        if rect.width() <= 0 or rect.height() <= 0:
+            return None
+        focus = QPointF(
+            max(0.0, min(1.0, (self.width() / 2.0 - rect.x()) / rect.width())),
+            max(0.0, min(1.0, (self.height() / 2.0 - rect.y()) / rect.height())),
+        )
+        return QSize(rect.size()), focus
+
     def restore_scroll_position(
         self, zoom_factor: float, horizontal_ratio: float, at_top: bool
     ) -> None:
@@ -310,6 +365,7 @@ class ImageViewerWidget(QWidget):
         )
         self._clamp_pan_offset()
         self._update_pan_cursor()
+        self._prepare_frame()
         self.update()
         self.zoom_changed.emit(self._zoom_factor)
         self._schedule_quality_update()
@@ -442,9 +498,8 @@ class ImageViewerWidget(QWidget):
             results.append((rect_r, right_pix))
         return results
 
-    def paintEvent(self, event):
-        """Draw one complete buffered frame using the cheapest suitable pixel source."""
-        painter = QPainter(self)
+    def _paint_scene(self, painter: QPainter, smooth: bool) -> None:
+        """Compose the current page or spread onto a supplied paint surface."""
         painter.fillRect(self.rect(), QColor("#1a1a1a"))
 
         if not self._has_image() or self.width() <= 0 or self.height() <= 0:
@@ -452,11 +507,53 @@ class ImageViewerWidget(QWidget):
 
         painter.setRenderHint(
             QPainter.RenderHint.SmoothPixmapTransform,
-            not self._interactive_transform,
+            smooth,
         )
         for rect, pixmap in self.target_rects():
             if pixmap is not None and not pixmap.isNull() and not rect.isEmpty():
                 painter.drawPixmap(rect, pixmap)
+
+    def _prepare_frame(self) -> None:
+        """Build a complete settled viewport frame before exposing it to paintEvent."""
+        if (
+            self._interactive_transform
+            or not self._has_image()
+            or self.width() <= 0
+            or self.height() <= 0
+        ):
+            self._prepared_frame = None
+            return
+
+        dpr = self.devicePixelRatioF()
+        frame = QPixmap(self.preview_bounds())
+        frame.setDevicePixelRatio(dpr)
+        frame.fill(QColor("#1a1a1a"))
+        frame_painter = QPainter(frame)
+        self._paint_scene(frame_painter, smooth=True)
+        frame_painter.end()
+
+        # Assign only after the whole frame has been composed. Until this point,
+        # paintEvent can continue presenting the previous completed frame.
+        self._prepared_frame = frame
+
+    def _prepared_frame_is_current(self) -> bool:
+        return bool(
+            self._prepared_frame is not None
+            and not self._prepared_frame.isNull()
+            and self._prepared_frame.size() == self.preview_bounds()
+            and abs(
+                self._prepared_frame.devicePixelRatioF() - self.devicePixelRatioF()
+            )
+            < 1e-6
+        )
+
+    def paintEvent(self, event):
+        """Blit a prepared single-mode frame, drawing live only during interaction."""
+        painter = QPainter(self)
+        if self._prepared_frame_is_current():
+            painter.drawPixmap(0, 0, self._prepared_frame)
+            return
+        self._paint_scene(painter, smooth=not self._interactive_transform)
 
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
@@ -508,27 +605,59 @@ class ImageViewerWidget(QWidget):
                 else Qt.CursorShape.ArrowCursor
             )
 
-    def _required_pixel_size(self) -> QSize:
-        rect = self.target_rect()
+    def _required_pixel_size(self, rect: Optional[QRect] = None) -> QSize:
+        if rect is None:
+            rect = self.target_rect()
         dpr = self.devicePixelRatioF()
         return QSize(
             max(1, int(round(rect.width() * dpr))),
             max(1, int(round(rect.height() * dpr))),
         )
 
-    def detail_bounds(self) -> QSize:
-        """Return the useful zoom decode size, capped by the detail byte budget."""
-        if not self._has_image():
+    def _page_render_state(
+        self, image_path: str
+    ) -> Optional[tuple[QSize, QRect, Optional[QPixmap], Optional[QPixmap]]]:
+        """Return source, target, preview, and detail buffers for one visible page."""
+        rects = self.target_rects()
+        if image_path == self._image_path:
+            if not rects:
+                return None
+            rect_index = 1 if self.is_spread() and self._invert_page_order else 0
+            return (
+                QSize(self._source_size),
+                rects[rect_index][0],
+                self._preview_pixmap,
+                self._full_pixmap,
+            )
+        if image_path == self._sec_image_path and self.is_spread():
+            rect_index = 0 if self._invert_page_order else 1
+            return (
+                QSize(self._sec_source_size),
+                rects[rect_index][0],
+                self._sec_preview_pixmap,
+                self._sec_full_pixmap,
+            )
+        return None
+
+    def detail_bounds(self, image_path: Optional[str] = None) -> QSize:
+        """Return useful zoom pixels for a page, capped by the detail byte budget."""
+        path = image_path or self._image_path
+        if not self._has_image() or not path:
             return QSize()
 
-        desired = self._source_size.scaled(
-            self._required_pixel_size(), Qt.AspectRatioMode.KeepAspectRatio
+        page_state = self._page_render_state(path)
+        if page_state is None:
+            return QSize()
+        source_size, target_rect, _preview, _detail = page_state
+        desired = source_size.scaled(
+            self._required_pixel_size(target_rect),
+            Qt.AspectRatioMode.KeepAspectRatio,
         )
-        if (
-            desired.width() > self._source_size.width()
-            or desired.height() > self._source_size.height()
+        if parse_pdf_page_uri(path) is None and (
+            desired.width() > source_size.width()
+            or desired.height() > source_size.height()
         ):
-            desired = QSize(self._source_size)
+            desired = QSize(source_size)
 
         estimated_bytes = desired.width() * desired.height() * 4
         if estimated_bytes > self.DETAIL_BUFFER_BYTES:
@@ -539,32 +668,56 @@ class ImageViewerWidget(QWidget):
             )
         return desired
 
+    @staticmethod
+    def _pixmap_covers(pixmap: Optional[QPixmap], required: QSize) -> bool:
+        return bool(
+            pixmap is not None
+            and not pixmap.isNull()
+            and pixmap.width() >= required.width()
+            and pixmap.height() >= required.height()
+        )
+
+    def detail_needed(self, image_path: str) -> bool:
+        """Return whether a visible page still needs a larger settled render."""
+        page_state = self._page_render_state(image_path)
+        if page_state is None:
+            return False
+        _source_size, _target_rect, preview, detail = page_state
+        required = self.detail_bounds(image_path)
+        return (
+            required.isValid()
+            and not self._pixmap_covers(preview, required)
+            and not self._pixmap_covers(detail, required)
+        )
+
     def _full_resolution_needed(self) -> bool:
         if not self._has_image():
             return False
-        required = self.detail_bounds()
-        preview_size = self._preview_pixmap.size()
-        return (
-            required.width() > preview_size.width()
-            or required.height() > preview_size.height()
+        return any(
+            self.detail_needed(path)
+            for path in (self._image_path, self._sec_image_path)
+            if path
         )
 
     def _detail_pixmap_covers_request(self) -> bool:
-        if self._full_pixmap is None:
-            return False
-        required = self.detail_bounds()
-        return (
-            self._full_pixmap.width() >= required.width()
-            and self._full_pixmap.height() >= required.height()
+        paths = [
+            path
+            for path in (self._image_path, self._sec_image_path)
+            if path
+        ]
+        return bool(paths) and all(
+            not self.detail_needed(path)
+            for path in paths
         )
 
     def _active_pixmap(self) -> Optional[QPixmap]:
-        if self._full_pixmap is not None and self._full_resolution_needed():
+        if self._full_pixmap is not None and not self._full_pixmap.isNull():
             return self._full_pixmap
         return self._preview_pixmap
 
     def _begin_interaction(self) -> None:
         self._interactive_transform = True
+        self._prepared_frame = None
         self._quality_timer.start()
 
     def _schedule_quality_update(self) -> None:
@@ -573,6 +726,7 @@ class ImageViewerWidget(QWidget):
 
     def _finish_interaction(self) -> None:
         self._interactive_transform = False
+        self._prepare_frame()
         self.update()
         if not self._has_image() or not self._image_path:
             return
@@ -637,13 +791,8 @@ class ImageViewerWidget(QWidget):
         at_top = self._pan_offset.y() >= limits.y() - 0.5
         at_bottom = self._pan_offset.y() <= -limits.y() + 0.5
         if (scroll_delta > 0 and at_top) or (scroll_delta < 0 and at_bottom):
-            horizontal_ratio = (
-                self._pan_offset.x() / limits.x() if limits.x() > 0.0 else 0.0
-            )
             direction = -1 if scroll_delta > 0 else 1
-            self.page_scroll_requested.emit(
-                direction, self._zoom_factor, horizontal_ratio
-            )
+            self.request_page_scroll(direction)
             return True
 
         self.pan_by(0.0, scroll_delta)

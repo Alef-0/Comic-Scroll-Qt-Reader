@@ -158,8 +158,9 @@ Comic Scroll Reader is designed to be operated entirely via keyboard and mouse w
 | Shortcut | Action |
 | :--- | :--- |
 | <kbd>1</kbd> / <kbd>2</kbd> | Switch to **Single Page** (default) / **Continuous Scroll** mode |
-| <kbd>→</kbd> / <kbd>↓</kbd> / <kbd>Space</kbd> | Next page / advance view |
-| <kbd>←</kbd> / <kbd>↑</kbd> / <kbd>Backspace</kbd> | Previous page |
+| **Arrows** / <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> | Pan a zoomed page; cross its boundary while preserving zoom and position |
+| <kbd>Space</kbd> / <kbd>Page Down</kbd> | Next page / advance view |
+| <kbd>Backspace</kbd> / <kbd>Page Up</kbd> | Previous page |
 | <kbd>Home</kbd> / <kbd>End</kbd> | Jump to First / Last page |
 | <kbd>Ctrl</kbd> + <kbd>G</kbd> | Open "Go to Page" prompt |
 | **Right Click** | Toggle between Single Page and Continuous Scroll |
@@ -172,6 +173,7 @@ Comic Scroll Reader is designed to be operated entirely via keyboard and mouse w
 | <kbd>Ctrl</kbd> + **Mouse Wheel** | Smooth zoom in or out centered on cursor |
 | <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>-</kbd> | Zoom in / Zoom out |
 | <kbd>Ctrl</kbd> + <kbd>0</kbd> | Reset zoom to fit window |
+| **View → Arrow / WASD Keys Pan Zoomed Images** | Toggle directional-key panning; enabled by default |
 | **Left Drag** | Pan the page or scroll viewport |
 | <kbd>Shift</kbd> + **Mouse Wheel** | Pan horizontally while zoomed |
 | **Mouse Wheel** | Pan vertically; seamlessly crosses page boundaries |

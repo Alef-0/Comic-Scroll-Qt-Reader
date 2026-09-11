@@ -163,6 +163,43 @@ class TestImageViewerWidget(unittest.TestCase):
         self.viewer.render(render_target)
         self.assertFalse(render_target.isNull())
 
+    def test_settled_single_page_is_prepared_as_a_complete_frame(self):
+        first = QImage(400, 300, QImage.Format.Format_RGB32)
+        first.fill(QColor("red"))
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(first), QSize(400, 300), "/tmp/first.png"
+        )
+        first_frame_key = self.viewer._prepared_frame.cacheKey()
+        self.assertEqual(
+            self.viewer._prepared_frame.toImage().pixelColor(400, 300),
+            QColor("red"),
+        )
+
+        second = QImage(400, 300, QImage.Format.Format_RGB32)
+        second.fill(QColor("blue"))
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(second), QSize(400, 300), "/tmp/second.png"
+        )
+
+        self.assertNotEqual(self.viewer._prepared_frame.cacheKey(), first_frame_key)
+        self.assertEqual(
+            self.viewer._prepared_frame.toImage().pixelColor(400, 300),
+            QColor("blue"),
+        )
+
+    def test_interaction_draws_live_then_rebuilds_prepared_frame(self):
+        image = QImage(400, 300, QImage.Format.Format_RGB32)
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(image), QSize(400, 300), "/tmp/page.png"
+        )
+        self.assertIsNotNone(self.viewer._prepared_frame)
+
+        self.viewer.zoom_in()
+        self.assertIsNone(self.viewer._prepared_frame)
+
+        self.viewer._finish_interaction()
+        self.assertIsNotNone(self.viewer._prepared_frame)
+
     def test_backwards_compatibility_alias(self):
         """Verify ScaledImageLabel is an alias of ImageViewerWidget."""
         self.assertIs(ScaledImageLabel, ImageViewerWidget)
@@ -236,6 +273,17 @@ class TestImageViewerWidget(unittest.TestCase):
         rect = self.viewer.target_rect()
         self.assertEqual(self.viewer.pan_offset, QPointF(-100, 0))
         self.assertEqual(rect.x() + rect.width(), self.viewer.width())
+
+    def test_directional_pan_moves_until_the_requested_edge(self):
+        image = QImage(400, 800, QImage.Format.Format_RGB32)
+        self.viewer.set_pixmap(QPixmap.fromImage(image))
+        self.viewer.zoom_at(2.0)
+
+        self.assertTrue(self.viewer.pan_in_direction(0, 1))
+        self.assertEqual(self.viewer.pan_offset.y(), -80.0)
+
+        self.viewer.pan_by(0.0, -10000.0)
+        self.assertFalse(self.viewer.pan_in_direction(0, 1))
 
     def test_zooming_back_to_fit_recentres_image(self):
         """Zooming out clears pan once the image fits the viewport again."""
@@ -365,6 +413,31 @@ class TestImageViewerWidget(unittest.TestCase):
             self.viewer.DETAIL_BUFFER_BYTES,
         )
 
+    def test_pdf_detail_can_render_beyond_document_point_dimensions(self):
+        preview = QImage(464, 600, QImage.Format.Format_RGB32)
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(preview),
+            QSize(612, 792),
+            "/tmp/book.pdf#page=0",
+        )
+
+        self.viewer.zoom_at(2.0)
+        bounds = self.viewer.detail_bounds()
+
+        self.assertGreater(bounds.width(), 612)
+        self.assertGreater(bounds.height(), 792)
+
+    def test_late_smaller_detail_does_not_replace_sharper_buffer(self):
+        preview = QImage(400, 300, QImage.Format.Format_RGB32)
+        self.viewer.set_preview_pixmap(
+            QPixmap.fromImage(preview), QSize(1600, 1200), "/tmp/page.png"
+        )
+        self.viewer.set_full_resolution_pixmap(QPixmap(1200, 900), "/tmp/page.png")
+
+        self.viewer.set_full_resolution_pixmap(QPixmap(800, 600), "/tmp/page.png")
+
+        self.assertEqual(self.viewer.pixmap().size(), QSize(1200, 900))
+
 
 class TestByteBoundedImageCache(unittest.TestCase):
     """Verify decoded-memory accounting and least-recently-used eviction."""
@@ -402,6 +475,20 @@ class TestByteBoundedImageCache(unittest.TestCase):
         self.assertIsNotNone(cached)
         self.assertEqual(cached.image.size(), large.size())
         self.assertEqual(cache.bytes_used, int(large.sizeInBytes()))
+
+    def test_pdf_cache_does_not_treat_page_points_as_pixel_ceiling(self):
+        cache = ByteBoundedImageCache(16 * 1024 * 1024)
+        path = "/tmp/book.pdf#page=0"
+        signature = (1, 1)
+        rendered = QImage(612, 792, QImage.Format.Format_RGB32)
+        cache.put(
+            (path, signature, (612, 792)),
+            CachedImage(rendered, QSize(612, 792)),
+        )
+
+        cached = cache.get_covering_preview(path, signature, QSize(927, 1200))
+
+        self.assertIsNone(cached)
 
 
 class TestImagePipelineCancellation(unittest.TestCase):
@@ -545,6 +632,59 @@ class TestMainWindow(unittest.TestCase):
         self.assertEqual(window.current_index, 0)
         window.deleteLater()
 
+    def test_navigation_keeps_completed_current_frame_until_replacement(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        current_path = window.image_list[0]
+        window.image_viewer.set_full_resolution_pixmap(
+            QPixmap(800, 800), current_path
+        )
+        current_pixmap_key = window.image_viewer.pixmap().cacheKey()
+        current_frame_key = window.image_viewer._prepared_frame.cacheKey()
+
+        window.go_to_index(1)
+
+        self.assertEqual(window.image_viewer.pixmap().cacheKey(), current_pixmap_key)
+        self.assertEqual(
+            window.image_viewer._prepared_frame.cacheKey(), current_frame_key
+        )
+        self.assert_loaded(window, 1)
+        window.shutdown()
+        window.deleteLater()
+
+    def test_single_to_scroll_preserves_page_scale_and_centre_point(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.image_viewer.zoom_at(2.0)
+        window.image_viewer.pan_by(-120.0, -80.0)
+        path = window.image_list[window.current_index]
+        displayed_size, expected_focus = window.image_viewer.page_view_snapshot(path)
+
+        window.set_mode(ViewerMode.SCROLL)
+
+        rect = window.scroll_reader.image_rects[window.current_index]
+        viewport = window.scroll_reader.viewport()
+        actual_focus = QPointF(
+            (
+                window.scroll_reader.horizontalScrollBar().value()
+                + viewport.width() / 2.0
+                - rect.x()
+            )
+            / rect.width(),
+            (
+                window.scroll_reader.verticalScrollBar().value()
+                + viewport.height() / 2.0
+                - rect.y()
+            )
+            / rect.height(),
+        )
+
+        self.assertAlmostEqual(rect.width(), displayed_size.width(), delta=1)
+        self.assertAlmostEqual(actual_focus.x(), expected_focus.x(), delta=0.01)
+        self.assertAlmostEqual(actual_focus.y(), expected_focus.y(), delta=0.01)
+        window.shutdown()
+        window.deleteLater()
+
     def test_scroll_page_transition_preserves_single_view_position(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
@@ -599,6 +739,70 @@ class TestMainWindow(unittest.TestCase):
         event_zoom = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
         window.keyPressEvent(event_zoom)
         self.assertGreater(window.image_viewer.zoom_factor, initial_zoom)
+        window.deleteLater()
+
+    def test_wasd_pans_zoomed_single_page_then_navigates_at_edge(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        image = QImage(400, 800, QImage.Format.Format_RGB32)
+        window.image_viewer.set_pixmap(QPixmap.fromImage(image))
+        window.image_viewer.zoom_at(2.0)
+
+        window.keyPressEvent(
+            QKeyEvent(
+                QKeyEvent.Type.KeyPress,
+                Qt.Key.Key_S,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        self.assertLess(window.image_viewer.pan_offset.y(), 0.0)
+        self.assertEqual(window.current_index, 0)
+
+        window.image_viewer.pan_by(0.0, -10000.0)
+        window.keyPressEvent(
+            QKeyEvent(
+                QKeyEvent.Type.KeyPress,
+                Qt.Key.Key_Down,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        self.assert_loaded(window, 1)
+        limits = window.image_viewer._pan_limits()
+        self.assertEqual(window.image_viewer.zoom_factor, 2.0)
+        self.assertEqual(window.image_viewer.pan_offset.y(), limits.y())
+
+        window.keyPressEvent(
+            QKeyEvent(
+                QKeyEvent.Type.KeyPress,
+                Qt.Key.Key_W,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        self.assert_loaded(window, 0)
+        limits = window.image_viewer._pan_limits()
+        self.assertEqual(window.image_viewer.zoom_factor, 2.0)
+        self.assertEqual(window.image_viewer.pan_offset.y(), -limits.y())
+        window.shutdown()
+        window.deleteLater()
+
+    def test_directional_pan_option_can_restore_direct_page_navigation(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        image = QImage(400, 800, QImage.Format.Format_RGB32)
+        window.image_viewer.set_pixmap(QPixmap.fromImage(image))
+        window.image_viewer.zoom_at(2.0)
+        window._directional_pan_action.setChecked(False)
+
+        window.keyPressEvent(
+            QKeyEvent(
+                QKeyEvent.Type.KeyPress,
+                Qt.Key.Key_S,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assert_loaded(window, 1)
+        window.shutdown()
         window.deleteLater()
 
     def test_failed_navigation_keeps_displayed_index_and_title(self):

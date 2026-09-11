@@ -74,7 +74,11 @@ class ByteBoundedImageCache:
             required_size = item.source_size.scaled(
                 bounds, Qt.AspectRatioMode.KeepAspectRatio
             )
-            if (
+            # Raster source dimensions are a real pixel ceiling. PDF page sizes,
+            # however, are document points and can be rendered sharply at larger
+            # pixel bounds, so a smaller cached PDF render must not satisfy a
+            # deeper zoom request.
+            if parse_pdf_page_uri(path) is None and (
                 required_size.width() > item.source_size.width()
                 or required_size.height() > item.source_size.height()
             ):

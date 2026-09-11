@@ -64,10 +64,12 @@ class TestKeyboardEventHandler(unittest.TestCase):
         self.assertEqual(toggle_events, ["toggle", "toggle"])
 
     def test_navigation_next_keys(self):
-        """Right, Down, PageDown, and Space trigger on_next_image."""
+        """Right, Down, D, S, PageDown, and Space trigger on_next_image."""
         for key in (
             Qt.Key.Key_Right,
             Qt.Key.Key_Down,
+            Qt.Key.Key_D,
+            Qt.Key.Key_S,
             Qt.Key.Key_PageDown,
             Qt.Key.Key_Space,
         ):
@@ -77,10 +79,12 @@ class TestKeyboardEventHandler(unittest.TestCase):
             self.assertEqual(self.events_called, ["next"])
 
     def test_navigation_prev_keys(self):
-        """Left, Up, PageUp, and Backspace trigger on_prev_image."""
+        """Left, Up, A, W, PageUp, and Backspace trigger on_prev_image."""
         for key in (
             Qt.Key.Key_Left,
             Qt.Key.Key_Up,
+            Qt.Key.Key_A,
+            Qt.Key.Key_W,
             Qt.Key.Key_PageUp,
             Qt.Key.Key_Backspace,
         ):
@@ -473,12 +477,14 @@ class TestCommonViewerControls(unittest.TestCase):
         self.assertEqual(self.view_resets, 1)
 
     def test_key_navigation(self):
-        """Arrows, Home, End emit correct signals."""
-        self.controls.handle_key_press(self._make_key(Qt.Key.Key_Right))
-        self.assertEqual(self.next_images, 1)
+        """Arrows and WASD share navigation signals."""
+        for key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_D, Qt.Key.Key_S):
+            self.controls.handle_key_press(self._make_key(key))
+        self.assertEqual(self.next_images, 4)
 
-        self.controls.handle_key_press(self._make_key(Qt.Key.Key_Left))
-        self.assertEqual(self.prev_images, 1)
+        for key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_A, Qt.Key.Key_W):
+            self.controls.handle_key_press(self._make_key(key))
+        self.assertEqual(self.prev_images, 4)
 
         self.controls.handle_key_press(self._make_key(Qt.Key.Key_Home))
         self.assertEqual(self.first_images, 1)
