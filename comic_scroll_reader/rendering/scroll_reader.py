@@ -9,6 +9,7 @@ from PyQt6.QtCore import QPointF, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QImageReader,
+    QHideEvent,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -20,6 +21,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QAbstractScrollArea
 
 from ..controls.input_controls import CommonViewerControls
+from ..imaging.gif_animation import GifAnimation, is_gif_path
 from ..imaging.image_pipeline import MIB, DecodeResult, ImagePipeline
 from ..media.archive_handler import get_archive_page_size, parse_archive_page_uri
 from ..media.pdf_handler import get_pdf_page_size, parse_pdf_page_uri
@@ -94,6 +96,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._pixmap_bytes_used = 0
         self._base_pixmaps: Dict[int, QPixmap] = {}
         self._base_pixmap_bytes_used = 0
+        self._animations: Dict[int, GifAnimation] = {}
+        self._animated_pixmaps: Dict[int, QPixmap] = {}
         self._decoded_bounds: Dict[int, QSize] = {}
         self._pending_requests: Dict[int, Dict[tuple[int, int], int]] = {}
         self._requested_indices: Set[int] = set()
@@ -215,6 +219,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         """Set image list and initialize layout, scrolling to start_index."""
         self._cancel_pending_requests()
         self._cancel_base_requests()
+        self._stop_animations()
         self._image_list = list(image_list)
         self._pixmaps.clear()
         self._pixmap_bytes_used = 0
@@ -252,6 +257,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         """Clear all images and reset layout."""
         self._cancel_pending_requests()
         self._cancel_base_requests()
+        self._stop_animations()
         self._image_list.clear()
         self._image_rects.clear()
         self._pixmaps.clear()
@@ -272,6 +278,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def release_render_cache(self) -> None:
         """Release sharp buffers while retaining the lightweight book fallback."""
         self._cancel_pending_requests()
+        self._stop_animations()
         self._pixmaps.clear()
         self._pixmap_bytes_used = 0
         self._decoded_bounds.clear()
@@ -409,6 +416,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
         if base is not None:
             self._base_pixmap_bytes_used -= self._pixmap_bytes(base)
         self._relayout()
+        animation = self._animations.get(index)
+        if animation is not None:
+            self._on_animation_frame(index, animation)
         self._update_visible_images()
 
     def _display_source_size(self, path: str) -> QSize:
@@ -804,6 +814,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
             return
 
         visible_indices, wanted_indices = self._cache_windows()
+        self._sync_animations(visible_indices)
         self._pipeline.retain_preview_paths(
             {self._image_list[idx] for idx in wanted_indices}
         )
@@ -1165,6 +1176,91 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self._failed_indices.add(idx)
         self.viewport().update()
 
+    def _sync_animations(self, visible_indices: Set[int]) -> None:
+        if not self.isVisible():
+            self._stop_animations()
+            return
+        desired_indices = {
+            idx
+            for idx in visible_indices
+            if 0 <= idx < len(self._image_list)
+            and is_gif_path(self._image_list[idx])
+        }
+        for idx in set(self._animations) - desired_indices:
+            self._stop_animation(idx)
+
+        dpr = self.devicePixelRatioF()
+        for idx in desired_indices:
+            animation = self._animations.get(idx)
+            if animation is None:
+                animation = GifAnimation(self._image_list[idx], self)
+                if not animation.is_valid:
+                    animation.deleteLater()
+                    continue
+                animation.frame_changed.connect(
+                    lambda idx=idx, animation=animation: self._on_animation_frame(
+                        idx, animation
+                    )
+                )
+                self._animations[idx] = animation
+
+            rect = self._image_rects[idx]
+            source_size = self._display_source_size(self._image_list[idx])
+            target_bounds = QSize(
+                max(1, int(round(rect.width() * dpr))),
+                max(1, int(round(rect.height() * dpr))),
+            )
+            display_size = source_size.scaled(
+                target_bounds, Qt.AspectRatioMode.KeepAspectRatio
+            )
+            raw_size = animation.source_size
+            if raw_size.isValid():
+                same_orientation_error = abs(
+                    raw_size.width() * source_size.height()
+                    - raw_size.height() * source_size.width()
+                )
+                swapped_orientation_error = abs(
+                    raw_size.height() * source_size.height()
+                    - raw_size.width() * source_size.width()
+                )
+                if swapped_orientation_error < same_orientation_error:
+                    display_size.transpose()
+            estimated_bytes = display_size.width() * display_size.height() * 4
+            if estimated_bytes > self.PIXMAP_CACHE_BYTES:
+                scale = (self.PIXMAP_CACHE_BYTES / estimated_bytes) ** 0.5
+                display_size = QSize(
+                    max(1, int(display_size.width() * scale)),
+                    max(1, int(display_size.height() * scale)),
+                )
+            animation.set_scaled_size(display_size)
+            animation.start()
+
+    def _on_animation_frame(
+        self, idx: int, animation: GifAnimation
+    ) -> None:
+        if (
+            self._animations.get(idx) is not animation
+            or not (0 <= idx < len(self._image_list))
+        ):
+            return
+        image = animation.current_image()
+        if image.isNull():
+            return
+        image = self._display_image(image, self._image_list[idx])
+        self._animated_pixmaps[idx] = QPixmap.fromImage(image)
+        self.viewport().update()
+
+    def _stop_animation(self, idx: int) -> None:
+        animation = self._animations.pop(idx, None)
+        self._animated_pixmaps.pop(idx, None)
+        if animation is not None:
+            animation.stop()
+            animation.deleteLater()
+
+    def _stop_animations(self) -> None:
+        for idx in list(self._animations):
+            self._stop_animation(idx)
+
     def paintEvent(self, event) -> None:
         """Paint visible images and placeholders onto the viewport."""
         painter = QPainter(self.viewport())
@@ -1195,7 +1291,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
             screen_y = rect.y() - scroll_y
             screen_rect = QRect(screen_x, screen_y, rect.width(), rect.height())
 
-            if i in self._pixmaps:
+            if i in self._animated_pixmaps:
+                painter.drawPixmap(screen_rect, self._animated_pixmaps[i])
+            elif i in self._pixmaps:
                 painter.drawPixmap(screen_rect, self._pixmaps[i])
             elif i in self._base_pixmaps:
                 # Smoothly enlarging the deliberately tiny base preview gives a
@@ -1244,6 +1342,10 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self.scroll_to_index(self._pending_scroll_index)
         else:
             self._update_visible_images()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        self._stop_animations()
+        super().hideEvent(event)
 
     # Mouse and wheel controls handled via CommonViewerControls
     def mousePressEvent(self, event: QMouseEvent) -> None:

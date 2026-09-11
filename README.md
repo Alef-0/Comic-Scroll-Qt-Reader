@@ -36,6 +36,8 @@ Powered by **Python 3**, **PyQt6**, and **Google PDFium**, it combines instant s
 - 📁 **Smart Folder & Archive Browsing**:
   - Open any folder containing images directly.
   - Read `.cbz` and `.cbr` books lazily without extracting the full archive to disk.
+  - Play animated GIF pages in both Single Page and Continuous Scroll modes,
+    including GIFs stored inside comic archives.
   - Natural numerical sorting (`1, 2, 10` instead of `1, 10, 2`).
 - 🖱️ **Fluid Navigation & Anchored Zoom**:
   - Zoom directly to your mouse cursor (`Ctrl + Wheel` or `Ctrl + +/-`).
@@ -252,7 +254,7 @@ For decoding and progressive-sharpening diagnostics, launch with `--debug` or se
 | **Comic Folders** | Any directory containing supported image formats (sorted numerically) |
 | **Comic Archives** | `.cbz`, `.cbr` (naturally sorted, decoded on demand) |
 | **PDF Documents** | `.pdf` (vector & raster, Google PDFium accelerated) |
-| **Raster Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.avif`, `.tiff` |
+| **Raster Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, animated `.gif`, `.bmp`, `.avif`, `.tiff` |
 
 ---
 

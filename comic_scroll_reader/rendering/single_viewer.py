@@ -1,20 +1,23 @@
 """Single image viewer widget implementation using Qt6."""
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import QPointF, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QHideEvent,
     QMouseEvent,
     QPainter,
     QPixmap,
     QResizeEvent,
+    QShowEvent,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import QWidget
 
 from ..controls.input_controls import CommonViewerControls, MouseEventHandler
+from ..imaging.gif_animation import GifAnimation, is_gif_path
 from ..media.pdf_handler import parse_pdf_page_uri
 
 
@@ -57,6 +60,9 @@ class ImageViewerWidget(QWidget):
         self._pan_offset: QPointF = QPointF(0.0, 0.0)
         self._interactive_transform = False
         self._prepared_frame: Optional[QPixmap] = None
+        self._animations: dict[str, GifAnimation] = {}
+        self._animated_pixmaps: dict[str, QPixmap] = {}
+        self._frame_transformer: Optional[Callable] = None
 
         self._quality_timer = QTimer(self)
         self._quality_timer.setSingleShot(True)
@@ -92,6 +98,7 @@ class ImageViewerWidget(QWidget):
 
     def set_pixmap(self, pixmap: QPixmap):
         """Set an already-loaded pixmap directly, primarily for embedded callers."""
+        self._stop_animations()
         self._preview_pixmap = pixmap
         self._full_pixmap = pixmap
         self._source_size = pixmap.size()
@@ -143,8 +150,15 @@ class ImageViewerWidget(QWidget):
             self._invert_page_order = invert_page_order
         if page_spacing is not None:
             self._page_spacing = page_spacing
+        self._sync_animation_sizes()
         self._prepare_frame()
         self.update()
+
+    def set_frame_transformer(self, transformer: Optional[Callable]) -> None:
+        """Apply the window's non-destructive page edits to GIF frames."""
+        self._frame_transformer = transformer
+        for path, animation in self._animations.items():
+            self._on_animation_frame(path, animation)
 
     def is_spread(self) -> bool:
         """Return True if currently configured and loaded with a two-page spread."""
@@ -161,6 +175,9 @@ class ImageViewerWidget(QWidget):
         return self._double_page and has_first and has_sec
 
     def _active_sec_pixmap(self) -> Optional[QPixmap]:
+        animated = self._animated_pixmaps.get(self._sec_image_path or "")
+        if animated is not None and not animated.isNull():
+            return animated
         if self._sec_full_pixmap is not None and not self._sec_full_pixmap.isNull():
             return self._sec_full_pixmap
         return self._sec_preview_pixmap
@@ -178,6 +195,7 @@ class ImageViewerWidget(QWidget):
         self._source_size = QSize(source_size)
         self._image_path = image_path
         self._clear_secondary_page()
+        self._sync_animations()
         self._interactive_transform = False
         if reset_view:
             self.reset_view()
@@ -210,6 +228,8 @@ class ImageViewerWidget(QWidget):
             self._sec_image_path = path2
         else:
             self._clear_secondary_page()
+
+        self._sync_animations()
 
         self._interactive_transform = False
         if reset_view:
@@ -290,6 +310,7 @@ class ImageViewerWidget(QWidget):
 
     def release_render_cache(self) -> None:
         """Drop all decoded buffers when this viewer is not the active mode."""
+        self._stop_animations()
         self._preview_pixmap = None
         self._full_pixmap = None
         self._source_size = QSize()
@@ -301,6 +322,7 @@ class ImageViewerWidget(QWidget):
 
     def clear(self):
         """Clear current image and repaint empty canvas."""
+        self._stop_animations()
         self._preview_pixmap = None
         self._full_pixmap = None
         self._source_size = QSize()
@@ -317,6 +339,7 @@ class ImageViewerWidget(QWidget):
         self._full_pixmap = None
         self._sec_full_pixmap = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._sync_animation_sizes()
         self._prepare_frame()
         self.update()
         self.zoom_changed.emit(self._zoom_factor)
@@ -389,6 +412,7 @@ class ImageViewerWidget(QWidget):
         )
         self._clamp_pan_offset()
         self._update_pan_cursor()
+        self._sync_animation_sizes()
         self._prepare_frame()
         self.update()
         self.zoom_changed.emit(self._zoom_factor)
@@ -410,6 +434,7 @@ class ImageViewerWidget(QWidget):
         )
         self._zoom_factor = new_zoom
         self._clamp_pan_offset()
+        self._sync_animation_sizes()
         self._begin_interaction()
 
         # Only advertise dragging when at least one image axis overflows.
@@ -541,6 +566,7 @@ class ImageViewerWidget(QWidget):
         """Build a complete settled viewport frame before exposing it to paintEvent."""
         if (
             self._interactive_transform
+            or self._animations
             or not self._has_image()
             or self.width() <= 0
             or self.height() <= 0
@@ -584,7 +610,16 @@ class ImageViewerWidget(QWidget):
         if self._has_image():
             self._clamp_pan_offset()
             self._update_pan_cursor()
+            self._sync_animation_sizes()
             self._begin_interaction()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._sync_animations()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        self._stop_animations()
+        super().hideEvent(event)
 
     def _has_image(self) -> bool:
         has_first = (
@@ -703,6 +738,8 @@ class ImageViewerWidget(QWidget):
 
     def detail_needed(self, image_path: str) -> bool:
         """Return whether a visible page still needs a larger settled render."""
+        if image_path in self._animations:
+            return False
         page_state = self._page_render_state(image_path)
         if page_state is None:
             return False
@@ -735,9 +772,98 @@ class ImageViewerWidget(QWidget):
         )
 
     def _active_pixmap(self) -> Optional[QPixmap]:
+        animated = self._animated_pixmaps.get(self._image_path or "")
+        if animated is not None and not animated.isNull():
+            return animated
         if self._full_pixmap is not None and not self._full_pixmap.isNull():
             return self._full_pixmap
         return self._preview_pixmap
+
+    def _sync_animations(self) -> None:
+        if not self.isVisible():
+            self._stop_animations()
+            return
+        desired_paths = {
+            path
+            for path in (self._image_path, self._sec_image_path)
+            if is_gif_path(path)
+        }
+        for path in set(self._animations) - desired_paths:
+            self._stop_animation(path)
+
+        for path in desired_paths - set(self._animations):
+            animation = GifAnimation(path, self)
+            if not animation.is_valid:
+                animation.deleteLater()
+                continue
+            animation.frame_changed.connect(
+                lambda path=path, animation=animation: self._on_animation_frame(
+                    path, animation
+                )
+            )
+            self._animations[path] = animation
+
+        self._sync_animation_sizes()
+        for path in desired_paths:
+            animation = self._animations.get(path)
+            if animation is not None:
+                animation.start()
+
+    def _sync_animation_sizes(self) -> None:
+        for path, animation in self._animations.items():
+            page_state = self._page_render_state(path)
+            if page_state is None:
+                continue
+            source_size, target_rect, _preview, _detail = page_state
+            desired = source_size.scaled(
+                self._required_pixel_size(target_rect),
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+            raw_size = animation.source_size
+            if raw_size.isValid():
+                same_orientation_error = abs(
+                    raw_size.width() * source_size.height()
+                    - raw_size.height() * source_size.width()
+                )
+                swapped_orientation_error = abs(
+                    raw_size.height() * source_size.height()
+                    - raw_size.width() * source_size.width()
+                )
+                if swapped_orientation_error < same_orientation_error:
+                    desired.transpose()
+            estimated_bytes = desired.width() * desired.height() * 4
+            if estimated_bytes > self.DETAIL_BUFFER_BYTES:
+                scale = (self.DETAIL_BUFFER_BYTES / estimated_bytes) ** 0.5
+                desired = QSize(
+                    max(1, int(desired.width() * scale)),
+                    max(1, int(desired.height() * scale)),
+                )
+            animation.set_scaled_size(desired)
+
+    def _on_animation_frame(
+        self, path: str, animation: GifAnimation
+    ) -> None:
+        if self._animations.get(path) is not animation:
+            return
+        image = animation.current_image()
+        if image.isNull():
+            return
+        if self._frame_transformer is not None:
+            image = self._frame_transformer(image, path)
+        self._animated_pixmaps[path] = QPixmap.fromImage(image)
+        self._prepared_frame = None
+        self.update()
+
+    def _stop_animation(self, path: str) -> None:
+        animation = self._animations.pop(path, None)
+        self._animated_pixmaps.pop(path, None)
+        if animation is not None:
+            animation.stop()
+            animation.deleteLater()
+
+    def _stop_animations(self) -> None:
+        for path in list(self._animations):
+            self._stop_animation(path)
 
     def _begin_interaction(self) -> None:
         self._interactive_transform = True

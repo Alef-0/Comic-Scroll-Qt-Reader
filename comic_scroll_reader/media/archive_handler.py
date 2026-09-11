@@ -128,6 +128,10 @@ class ComicArchiveHandler:
     def get_page_name(self, page_index: int) -> str:
         return str(self._page_info(page_index).filename)
 
+    def get_page_data(self, page_index: int) -> bytes:
+        """Return an independent copy of a page for decoders that need a device."""
+        return self._read_page_data(page_index)
+
     def _page_info(self, page_index: int):
         if not (0 <= page_index < self.page_count):
             raise IndexError(
@@ -322,6 +326,14 @@ def close_all_archive_handlers() -> None:
 
 def get_archive_page_size(archive_path: str, page_index: int) -> QSize:
     return get_archive_handler(archive_path).get_page_size(page_index)
+
+
+def get_archive_page_name(archive_path: str, page_index: int) -> str:
+    return get_archive_handler(archive_path).get_page_name(page_index)
+
+
+def get_archive_page_data(archive_path: str, page_index: int) -> bytes:
+    return get_archive_handler(archive_path).get_page_data(page_index)
 
 
 def decode_archive_page(

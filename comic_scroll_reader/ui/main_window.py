@@ -235,6 +235,9 @@ class MainWindow(QMainWindow):
             self._transform_image_for_display,
             self._transformed_source_size,
         )
+        self.image_viewer.set_frame_transformer(
+            self._transform_image_for_display
+        )
         self._error_dialog: Optional[QMessageBox] = None
         self._single_scroll_transition: Optional[
             tuple[int, float, float, bool]

@@ -20,6 +20,7 @@ hiddenimports = [
     'comic_scroll_reader.rendering.scroll_reader',
     'comic_scroll_reader.rendering.single_viewer',
     'comic_scroll_reader.imaging.image_pipeline',
+    'comic_scroll_reader.imaging.gif_animation',
     'comic_scroll_reader.media.archive_handler',
     'comic_scroll_reader.media.pdf_handler',
     'comic_scroll_reader.controls.input_controls',
