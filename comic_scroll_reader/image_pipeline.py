@@ -352,8 +352,14 @@ class ImagePipeline(QObject):
     ) -> None:
         self._request(path, QSize(bounds), request_id, purpose, priority)
 
-    def request_full(self, path: str, request_id: int) -> None:
-        self._request(path, None, request_id, "current-full", 1)
+    def request_full(
+        self,
+        path: str,
+        request_id: int,
+        purpose: str = "current-full",
+        priority: int = 1,
+    ) -> None:
+        self._request(path, None, request_id, purpose, priority)
 
     def wait_for_idle(self) -> None:
         """Cancel pending consumers and wait for native decoders to finish safely."""

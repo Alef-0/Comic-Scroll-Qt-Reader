@@ -3,7 +3,7 @@
 import logging
 import math
 import os
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from PyQt6.QtCore import QPointF, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
@@ -99,6 +99,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._requested_indices: Set[int] = set()
         self._base_pending_indices: Set[int] = set()
         self._failed_indices: Set[int] = set()
+        self._image_transformer: Optional[Callable] = None
+        self._size_transformer: Optional[Callable] = None
 
         self._zoom_factor: float = 1.0
         self._current_visible_index: int = 0
@@ -381,6 +383,45 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def reset_zoom(self) -> None:
         self.set_zoom(1.0)
 
+    def set_page_transformers(
+        self,
+        image_transformer: Optional[Callable],
+        size_transformer: Optional[Callable],
+    ) -> None:
+        """Install non-destructive display transforms supplied by the window."""
+        self._image_transformer = image_transformer
+        self._size_transformer = size_transformer
+
+    def refresh_page_transform(self, index: int) -> None:
+        """Drop one page's display buffers and rebuild its transformed layout."""
+        if not (0 <= index < len(self._image_list)):
+            return
+        if self._pipeline is not None:
+            self._pipeline.cancel_queued(
+                {f"scroll-{index}", f"scroll-base-{index}"}
+            )
+        self._pending_requests.pop(index, None)
+        self._requested_indices.discard(index)
+        self._base_pending_indices.discard(index)
+        self._failed_indices.discard(index)
+        self._drop_pixmap(index)
+        base = self._base_pixmaps.pop(index, None)
+        if base is not None:
+            self._base_pixmap_bytes_used -= self._pixmap_bytes(base)
+        self._relayout()
+        self._update_visible_images()
+
+    def _display_source_size(self, path: str) -> QSize:
+        size = QSize(self._get_source_size(path))
+        if self._size_transformer is not None:
+            return QSize(self._size_transformer(size, path))
+        return size
+
+    def _display_image(self, image, path: str):
+        if self._image_transformer is not None:
+            return self._image_transformer(image, path)
+        return image
+
     def _get_source_size(self, path: str) -> QSize:
         """Query and cache native dimensions of image via header metadata or PDF handler."""
         if path in self._image_sizes:
@@ -541,7 +582,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
     def _native_display_size(self, path: str) -> QSize:
         """Scale a page from its native dimensions using only the shared zoom."""
-        source_size = self._get_source_size(path)
+        source_size = self._display_source_size(path)
         return QSize(
             max(1, int(round(max(1, source_size.width()) * self._zoom_factor))),
             max(1, int(round(max(1, source_size.height()) * self._zoom_factor))),
@@ -619,7 +660,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         return canvas_width, max(0, current_y - spacing)
 
     def _scaled_height(self, path: str, target_width: int) -> int:
-        source_size = self._get_source_size(path)
+        source_size = self._display_source_size(path)
         source_width = max(1, source_size.width())
         source_height = max(1, source_size.height())
         return max(1, int(round(target_width * source_height / source_width)))
@@ -633,7 +674,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         return QSize(width, height)
 
     def _fit_height_width(self, index: int, viewport_size: QSize) -> float:
-        source_size = self._get_source_size(self._image_list[index])
+        source_size = self._display_source_size(self._image_list[index])
         return (
             viewport_size.height()
             * max(1, source_size.width())
@@ -903,8 +944,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
             return
 
         aspect_sum = sum(
-            max(1, self._get_source_size(path).height())
-            / max(1, self._get_source_size(path).width())
+            max(1, self._display_source_size(path).height())
+            / max(1, self._display_source_size(path).width())
             for path in self._image_list
         )
         byte_budget = max(1, int(self.BASE_PIXMAP_CACHE_BYTES * 0.9))
@@ -923,7 +964,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
             idx for idx in range(len(self._image_list)) if idx not in initial_row
         ]
         for idx in ordered_indices:
-            source_size = self._get_source_size(self._image_list[idx])
+            source_size = self._display_source_size(self._image_list[idx])
             base_height = max(
                 1,
                 int(
@@ -1031,7 +1072,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
         previous = self._base_pixmaps.get(idx)
         if previous is not None:
             self._base_pixmap_bytes_used -= self._pixmap_bytes(previous)
-        pixmap = QPixmap.fromImage(result.image)
+        pixmap = QPixmap.fromImage(
+            self._display_image(result.image, result.request.path)
+        )
         self._base_pixmaps[idx] = pixmap
         self._base_pixmap_bytes_used += self._pixmap_bytes(pixmap)
         self.viewport().update()
@@ -1069,7 +1112,9 @@ class ScrollReaderWidget(QAbstractScrollArea):
             previous = self._pixmaps.get(idx)
             if previous is not None:
                 self._pixmap_bytes_used -= self._pixmap_bytes(previous)
-            pixmap = QPixmap.fromImage(result.image)
+            pixmap = QPixmap.fromImage(
+                self._display_image(result.image, request.path)
+            )
             self._pixmaps[idx] = pixmap
             self._pixmap_bytes_used += self._pixmap_bytes(pixmap)
             self._decoded_bounds[idx] = fulfilled_bounds

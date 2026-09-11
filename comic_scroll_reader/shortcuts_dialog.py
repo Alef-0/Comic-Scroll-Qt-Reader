@@ -51,9 +51,10 @@ class ShortcutsDialog(QDialog):
             (
                 ("Ctrl + O", "Open an image, PDF, CBZ, or CBR"),
                 ("Ctrl + Shift + O", "Open a comic folder"),
+                ("Ctrl + Shift + S", "Save the edited current page as a new image"),
                 ("Ctrl + W", "Close the current document"),
                 ("F11 / F", "Toggle fullscreen"),
-                ("H", "Show or hide the bottom controls"),
+                ("H", "Show or hide the reader HUD"),
                 ("F1", "Open this shortcuts guide"),
                 ("Esc", "Close the reader"),
             ),

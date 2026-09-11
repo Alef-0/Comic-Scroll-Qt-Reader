@@ -24,9 +24,11 @@ from PyQt6.QtGui import (
     QIcon,
     QKeyEvent,
     QMouseEvent,
+    QImage,
     QPixmap,
     QResizeEvent,
     QWheelEvent,
+    QTransform,
 )
 from PyQt6.QtCore import QEvent, Qt, QSize, QTimer, pyqtSignal
 
@@ -188,7 +190,7 @@ class MainWindow(QMainWindow):
         self.scroll_reader.mode_single_requested.connect(lambda: self.set_mode(ViewerMode.SINGLE))
         self.scroll_reader.mode_scroll_requested.connect(lambda: self.set_mode(ViewerMode.SCROLL))
 
-        # Floating bottom HUD overlay
+        # Floating viewer HUD overlay
         self._hud = ViewerHud(self)
         self._hud.prev_clicked.connect(self.prev_image)
         self._hud.next_clicked.connect(self.next_image)
@@ -199,6 +201,9 @@ class MainWindow(QMainWindow):
         self._hud.zoom_reset_clicked.connect(self._reset_zoom)
         self._hud.fullscreen_toggled.connect(self.toggle_fullscreen)
         self._hud.comic_mode_selected.connect(self.set_comic_mode)
+        self._hud.thumbnails_toggled.connect(self._set_thumbnails_visible)
+        self._hud.thumbnail_requested.connect(self._request_hud_thumbnail)
+        self._hud.thumbnail_clicked.connect(self._go_to_thumbnail)
         self._hud.set_comic_mode(ComicMode.DEFAULT.value)
         self._hud.hide_immediately()
 
@@ -256,6 +261,15 @@ class MainWindow(QMainWindow):
         self._request_generation = 0
         self._full_request_keys: set[tuple[str, int, int]] = set()
         self._refine_request_keys: set[tuple[str, int, int]] = set()
+        self._thumbnail_generation = 0
+        self._thumbnail_indices_by_path: dict[str, int] = {}
+        self._page_edits: dict[str, dict[str, object]] = {}
+        self._edit_save_generation = 0
+        self._pending_page_save: Optional[tuple[int, str, str]] = None
+        self.scroll_reader.set_page_transformers(
+            self._transform_image_for_display,
+            self._transformed_source_size,
+        )
         self._error_dialog: Optional[QMessageBox] = None
         self._single_scroll_transition: Optional[
             tuple[int, float, float, bool]
@@ -335,6 +349,24 @@ class MainWindow(QMainWindow):
         self._directional_pan_action.setChecked(
             self._state_bool(state.get("directional_pan"), True)
         )
+        show_thumbnails = self._state_bool(state.get("show_thumbnails"), False)
+        hud_at_top = self._state_bool(state.get("hud_at_top"), False)
+        thumbnail_layout = state.get("thumbnail_layout", "vertical")
+        if thumbnail_layout not in {"horizontal", "vertical"}:
+            thumbnail_layout = "vertical"
+        self._thumbnail_action.setChecked(show_thumbnails)
+        self._hud_top_action.setChecked(hud_at_top)
+        self._thumbnail_layout_actions[thumbnail_layout].setChecked(True)
+        self._hud.set_thumbnail_layout(thumbnail_layout)
+        self._hud.set_thumbnails_visible(show_thumbnails)
+        self._hud.set_at_top(hud_at_top)
+        hud_scale = state.get("hud_scale", 100)
+        if not isinstance(hud_scale, int) or isinstance(hud_scale, bool):
+            hud_scale = 100
+        self._hud.set_hud_scale(hud_scale)
+        self._always_save_options_action.setChecked(
+            self._state_bool(state.get("always_save_options"), True)
+        )
 
         self.scroll_reader.set_layout_options(
             double_page=double_page,
@@ -364,6 +396,11 @@ class MainWindow(QMainWindow):
             "viewer_mode": self.viewer_mode.value,
             "comic_mode": self.comic_mode.value,
             "directional_pan": self._directional_pan_action.isChecked(),
+            "show_thumbnails": self._thumbnail_action.isChecked(),
+            "hud_at_top": self._hud_top_action.isChecked(),
+            "thumbnail_layout": self._hud.thumbnail_layout(),
+            "hud_scale": self._hud.hud_scale(),
+            "always_save_options": self._always_save_options_action.isChecked(),
             "fullscreen": self.isFullScreen(),
             "scroll_zoom": self.scroll_reader.zoom_factor,
             "layout": {
@@ -587,6 +624,169 @@ class MainWindow(QMainWindow):
         self.image_viewer.reset_view()
         self.scroll_reader.reset_zoom()
 
+    def _reset_hud_pages(self) -> None:
+        """Start a fresh lazy thumbnail set for the current document."""
+        self._page_edits.clear()
+        self._thumbnail_generation += 1
+        self._thumbnail_indices_by_path = {
+            path: index for index, path in enumerate(self.image_list)
+        }
+        self._hud.set_page_count(len(self.image_list))
+
+    def _set_thumbnails_visible(self, visible: bool) -> None:
+        """Keep the HUD button and View-menu thumbnail option synchronized."""
+        if hasattr(self, "_thumbnail_action"):
+            previous = self._thumbnail_action.blockSignals(True)
+            self._thumbnail_action.setChecked(visible)
+            self._thumbnail_action.blockSignals(previous)
+        if self._hud.thumbnails_visible() != visible:
+            self._hud.set_thumbnails_visible(visible)
+
+    def _set_hud_at_top(self, at_top: bool) -> None:
+        self._hud.set_at_top(at_top)
+
+    def _set_thumbnail_layout(self, layout: str) -> None:
+        if layout not in {"horizontal", "vertical"}:
+            layout = "vertical"
+        action = self._thumbnail_layout_actions.get(layout)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+        self._hud.set_thumbnail_layout(layout)
+
+    def _current_edit_index(self) -> Optional[int]:
+        index = self._effective_index()
+        return index if 0 <= index < len(self.image_list) else None
+
+    def _page_edit(self, path: str) -> dict[str, object]:
+        return self._page_edits.setdefault(
+            path,
+            {"rotation": 0, "mirror": False, "flip": False},
+        )
+
+    def _transform_image_for_display(self, image: QImage, path: str) -> QImage:
+        edit = self._page_edits.get(path)
+        if not edit or image.isNull():
+            return image
+        transformed = image
+        if bool(edit.get("mirror")):
+            transformed = transformed.mirrored(True, False)
+        if bool(edit.get("flip")):
+            transformed = transformed.mirrored(False, True)
+        rotation = int(edit.get("rotation", 0)) % 360
+        if rotation:
+            transformed = transformed.transformed(
+                QTransform().rotate(rotation),
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return transformed
+
+    def _transformed_source_size(self, size: QSize, path: str) -> QSize:
+        edit = self._page_edits.get(path)
+        rotation = int(edit.get("rotation", 0)) % 360 if edit else 0
+        if rotation in {90, 270}:
+            return QSize(size.height(), size.width())
+        return QSize(size)
+
+    def _refresh_current_page_edit(self, index: int) -> None:
+        self.scroll_reader.refresh_page_transform(index)
+        self._hud.invalidate_thumbnail(index)
+        if self.viewer_mode == ViewerMode.SINGLE:
+            self._request_index(index, force=True)
+        else:
+            self.update_title()
+
+    def _rotate_current_page(self, degrees: int) -> None:
+        index = self._current_edit_index()
+        if index is None:
+            return
+        edit = self._page_edit(self.image_list[index])
+        edit["rotation"] = (int(edit["rotation"]) + degrees) % 360
+        self._refresh_current_page_edit(index)
+
+    def _mirror_current_page(self) -> None:
+        index = self._current_edit_index()
+        if index is None:
+            return
+        edit = self._page_edit(self.image_list[index])
+        edit["mirror"] = not bool(edit["mirror"])
+        self._refresh_current_page_edit(index)
+
+    def _flip_current_page(self) -> None:
+        index = self._current_edit_index()
+        if index is None:
+            return
+        edit = self._page_edit(self.image_list[index])
+        edit["flip"] = not bool(edit["flip"])
+        self._refresh_current_page_edit(index)
+
+    def _reset_current_page_edit(self) -> None:
+        index = self._current_edit_index()
+        if index is None:
+            return
+        self._page_edits.pop(self.image_list[index], None)
+        self._refresh_current_page_edit(index)
+
+    def save_current_page_as(self) -> None:
+        """Export the current page with its non-destructive display edits."""
+        index = self._current_edit_index()
+        if index is None:
+            return
+        source_path = self.image_list[index]
+        pdf_info = parse_pdf_page_uri(source_path)
+        archive_info = parse_archive_page_uri(source_path)
+        virtual_page = pdf_info or archive_info
+        if virtual_page is not None:
+            container_path, page_index = virtual_page
+            container_name = os.path.splitext(os.path.basename(container_path))[0]
+            base_name = f"{container_name}-page-{page_index + 1}"
+        else:
+            base_name = os.path.splitext(os.path.basename(source_path))[0]
+        suggested = os.path.join(
+            self.folder_path or "",
+            f"{base_name}-edited.png",
+        )
+        target_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Current Page As",
+            suggested,
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;WebP Image (*.webp)",
+        )
+        if not target_path:
+            return
+        self._edit_save_generation += 1
+        self._pending_page_save = (
+            self._edit_save_generation,
+            source_path,
+            target_path,
+        )
+        self._image_pipeline.request_full(
+            source_path,
+            self._edit_save_generation,
+            purpose="edit-save",
+            priority=2,
+        )
+
+    def _request_hud_thumbnail(self, index: int) -> None:
+        if not (0 <= index < len(self.image_list)):
+            return
+        self._image_pipeline.request_preview(
+            self.image_list[index],
+            ViewerHud.THUMBNAIL_DECODE_SIZE,
+            self._thumbnail_generation,
+            purpose="hud-thumbnail",
+            priority=-2,
+        )
+
+    def _go_to_thumbnail(self, index: int) -> None:
+        if not (0 <= index < len(self.image_list)):
+            return
+        if self.viewer_mode == ViewerMode.SCROLL:
+            self.scroll_reader.scroll_to_index(index)
+            self.current_index = index
+            self.update_title()
+        else:
+            self.go_to_index(index)
+
     def discover_images(
         self, folder_path: str, initial_file: Optional[str] = None
     ) -> bool:
@@ -631,6 +831,8 @@ class MainWindow(QMainWindow):
                 requested_index = self.image_list.index(init_abs)
             except ValueError:
                 requested_index = 0 if self.image_list else -1
+
+        self._reset_hud_pages()
 
         self.current_index = requested_index
         self._requested_index = None
@@ -697,6 +899,7 @@ class MainWindow(QMainWindow):
         self.image_list = [
             build_pdf_page_uri(resolved, i) for i in range(handler.page_count)
         ]
+        self._reset_hud_pages()
 
         # Unlock sizing for reading view
         self.setMinimumSize(320, 180)
@@ -762,6 +965,7 @@ class MainWindow(QMainWindow):
             build_archive_page_uri(resolved, index)
             for index in range(handler.page_count)
         ]
+        self._reset_hud_pages()
 
         self.setMinimumSize(320, 180)
         self.setMaximumSize(16777215, 16777215)
@@ -1107,6 +1311,32 @@ class MainWindow(QMainWindow):
 
     def _on_image_ready(self, result: DecodeResult) -> None:
         request = result.request
+        if request.purpose == "edit-save":
+            pending = self._pending_page_save
+            if pending is None or pending[:2] != (
+                request.request_id,
+                request.path,
+            ):
+                return
+            target_path = pending[2]
+            self._pending_page_save = None
+            image = self._transform_image_for_display(result.image, request.path)
+            if not image.save(target_path):
+                self._show_load_error(
+                    target_path,
+                    "The edited page could not be written in the selected format.",
+                )
+            return
+        if request.purpose == "hud-thumbnail":
+            if request.request_id != self._thumbnail_generation:
+                return
+            index = self._thumbnail_indices_by_path.get(request.path)
+            if index is not None:
+                self._hud.set_thumbnail(
+                    index,
+                    self._transform_image_for_display(result.image, request.path),
+                )
+            return
         if request.purpose == "prefetch-preview":
             return
         if request.request_id != self._request_generation:
@@ -1147,19 +1377,41 @@ class MainWindow(QMainWindow):
             if len(spread) == 2:
                 res1 = self._spread_pending_results[expected_paths[0]]
                 res2 = self._spread_pending_results[expected_paths[1]]
-                pix1 = QPixmap.fromImage(res1.image)
-                pix2 = QPixmap.fromImage(res2.image)
+                image1 = self._transform_image_for_display(
+                    res1.image, res1.request.path
+                )
+                image2 = self._transform_image_for_display(
+                    res2.image, res2.request.path
+                )
+                pix1 = QPixmap.fromImage(image1)
+                pix2 = QPixmap.fromImage(image2)
                 self.image_viewer.set_spread_preview(
-                    (pix1, res1.source_size, res1.request.path),
-                    (pix2, res2.source_size, res2.request.path),
+                    (
+                        pix1,
+                        self._transformed_source_size(
+                            res1.source_size, res1.request.path
+                        ),
+                        res1.request.path,
+                    ),
+                    (
+                        pix2,
+                        self._transformed_source_size(
+                            res2.source_size, res2.request.path
+                        ),
+                        res2.request.path,
+                    ),
                     reset_view=not preserve_scroll,
                 )
             else:
                 res = self._spread_pending_results[expected_paths[0]]
-                pix = QPixmap.fromImage(res.image)
+                pix = QPixmap.fromImage(
+                    self._transform_image_for_display(res.image, res.request.path)
+                )
                 self.image_viewer.set_preview_pixmap(
                     pix,
-                    res.source_size,
+                    self._transformed_source_size(
+                        res.source_size, res.request.path
+                    ),
                     res.request.path,
                     reset_view=not preserve_scroll,
                 )
@@ -1191,7 +1443,9 @@ class MainWindow(QMainWindow):
         if request.path not in current_paths:
             return
 
-        pixmap = QPixmap.fromImage(result.image)
+        pixmap = QPixmap.fromImage(
+            self._transform_image_for_display(result.image, request.path)
+        )
         if request.purpose == "refined-preview":
             bounds = request.bounds
             if bounds is None:
@@ -1215,6 +1469,17 @@ class MainWindow(QMainWindow):
 
     def _on_image_failed(self, result: DecodeResult) -> None:
         request = result.request
+        if request.purpose == "edit-save":
+            pending = self._pending_page_save
+            if pending is not None and pending[:2] == (
+                request.request_id,
+                request.path,
+            ):
+                self._pending_page_save = None
+                self._show_load_error(pending[2], result.error)
+            return
+        if request.purpose == "hud-thumbnail":
+            return
         if request.request_id != self._request_generation:
             return
         if request.purpose == "refined-preview":
@@ -1401,6 +1666,52 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        # Edit Menu
+        edit_menu = menubar.addMenu("&Edit")
+
+        self._rotate_left_action = QAction("Rotate / Spin Left 90°", self)
+        self._rotate_left_action.triggered.connect(
+            lambda: self._rotate_current_page(-90)
+        )
+        edit_menu.addAction(self._rotate_left_action)
+
+        self._rotate_right_action = QAction("Rotate / Spin Right 90°", self)
+        self._rotate_right_action.triggered.connect(
+            lambda: self._rotate_current_page(90)
+        )
+        edit_menu.addAction(self._rotate_right_action)
+
+        self._mirror_page_action = QAction("Mirror Horizontally", self)
+        self._mirror_page_action.triggered.connect(self._mirror_current_page)
+        edit_menu.addAction(self._mirror_page_action)
+
+        self._flip_page_action = QAction("Flip Vertically", self)
+        self._flip_page_action.triggered.connect(self._flip_current_page)
+        edit_menu.addAction(self._flip_page_action)
+
+        self._reset_page_edit_action = QAction("Reset Current Page Edits", self)
+        self._reset_page_edit_action.triggered.connect(
+            self._reset_current_page_edit
+        )
+        edit_menu.addAction(self._reset_page_edit_action)
+
+        edit_menu.addSeparator()
+
+        self._save_current_page_action = QAction("Save Current Page &As...", self)
+        self._save_current_page_action.setShortcut("Ctrl+Shift+S")
+        self._save_current_page_action.triggered.connect(self.save_current_page_as)
+        edit_menu.addAction(self._save_current_page_action)
+
+        edit_menu.addSeparator()
+
+        self._always_save_options_action = QAction("Always Save Options", self)
+        self._always_save_options_action.setCheckable(True)
+        self._always_save_options_action.setChecked(True)
+        self._always_save_options_action.setToolTip(
+            "Persist interface and reader options between launches"
+        )
+        edit_menu.addAction(self._always_save_options_action)
+
         # View Menu
         view_menu = menubar.addMenu("&View")
 
@@ -1413,16 +1724,6 @@ class MainWindow(QMainWindow):
         mode_scroll_action.setShortcut("2")
         mode_scroll_action.triggered.connect(lambda: self.set_mode(ViewerMode.SCROLL))
         view_menu.addAction(mode_scroll_action)
-
-        self._directional_pan_action = QAction(
-            "Arrow / WASD Keys Pan Zoomed Images", self
-        )
-        self._directional_pan_action.setCheckable(True)
-        self._directional_pan_action.setChecked(True)
-        self._directional_pan_action.setToolTip(
-            "Pan zoomed images with direction keys, changing pages at an edge"
-        )
-        view_menu.addAction(self._directional_pan_action)
 
         view_menu.addSeparator()
 
@@ -1498,6 +1799,21 @@ class MainWindow(QMainWindow):
         hud_action.triggered.connect(self._hud.toggle_visibility)
         view_menu.addAction(hud_action)
 
+        self._thumbnail_action = QAction("Show Page &Thumbnails", self)
+        self._thumbnail_action.setCheckable(True)
+        self._thumbnail_action.setChecked(False)
+        self._thumbnail_action.setToolTip(
+            "Show lazy page previews alongside the reader HUD"
+        )
+        self._thumbnail_action.triggered.connect(self._set_thumbnails_visible)
+        view_menu.addAction(self._thumbnail_action)
+
+        self._hud_top_action = QAction("Place HUD at &Top", self)
+        self._hud_top_action.setCheckable(True)
+        self._hud_top_action.setChecked(False)
+        self._hud_top_action.triggered.connect(self._set_hud_at_top)
+        view_menu.addAction(self._hud_top_action)
+
         # Comic Modes Menu
         comic_menu = menubar.addMenu("&Comic Modes")
         self._comic_mode_group = QActionGroup(self)
@@ -1522,6 +1838,40 @@ class MainWindow(QMainWindow):
 
         # Navigate Menu
         nav_menu = menubar.addMenu("&Navigate")
+
+        self._directional_pan_action = QAction(
+            "Arrow / WASD Keys Pan Zoomed Images", self
+        )
+        self._directional_pan_action.setCheckable(True)
+        self._directional_pan_action.setChecked(True)
+        self._directional_pan_action.setToolTip(
+            "Pan zoomed images with direction keys, changing pages at an edge"
+        )
+        nav_menu.addAction(self._directional_pan_action)
+
+        nav_menu.addSeparator()
+
+        thumbnail_layout_menu = nav_menu.addMenu("Thumbnail &Layout")
+        self._thumbnail_layout_group = QActionGroup(self)
+        self._thumbnail_layout_group.setExclusive(True)
+        self._thumbnail_layout_actions = {}
+        for label, layout in (
+            ("Vertical Sidebar", "vertical"),
+            ("Horizontal Filmstrip", "horizontal"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(layout == "vertical")
+            action.triggered.connect(
+                lambda checked=False, selected=layout: (
+                    self._set_thumbnail_layout(selected) if checked else None
+                )
+            )
+            self._thumbnail_layout_group.addAction(action)
+            self._thumbnail_layout_actions[layout] = action
+            thumbnail_layout_menu.addAction(action)
+
+        nav_menu.addSeparator()
 
         next_action = QAction("&Next Page\tRight / Down / D / S", self)
         next_action.triggered.connect(self.next_image)
@@ -1726,6 +2076,7 @@ class MainWindow(QMainWindow):
         """Close current document or folder and return to welcome screen."""
         self.folder_path = None
         self.image_list = []
+        self._reset_hud_pages()
         self.current_index = -1
         self._requested_index = None
         self.image_viewer.clear()
@@ -1834,7 +2185,10 @@ class MainWindow(QMainWindow):
         """Finish decoder work before releasing Qt and PDFium resources."""
         if self._shutdown_started:
             return
-        save_state(self._state_snapshot())
+        if self._always_save_options_action.isChecked():
+            save_state(self._state_snapshot())
+        else:
+            save_state({"always_save_options": False})
         self._shutdown_started = True
         self._image_pipeline.shutdown()
         if self.pdf_path:
