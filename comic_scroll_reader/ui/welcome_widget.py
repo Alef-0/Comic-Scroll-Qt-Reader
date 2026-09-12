@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core.resources import APP_ICON_PATH, APP_NAME
+from ..core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
 
 
 class WelcomeWidget(QWidget):
@@ -83,13 +83,15 @@ class WelcomeWidget(QWidget):
         icon_label.setObjectName("heroIcon")
         icon_label.setFixedSize(50, 50)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setPixmap(
-            QPixmap(str(APP_ICON_PATH)).scaled(
+        app_icon = get_app_icon()
+        icon_pixmap = app_icon.pixmap(icon_label.size())
+        if icon_pixmap.isNull() and APP_ICON_PATH.exists():
+            icon_pixmap = QPixmap(str(APP_ICON_PATH)).scaled(
                 icon_label.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-        )
+        icon_label.setPixmap(icon_pixmap)
         hero_layout.addWidget(icon_label)
 
         identity_layout = QVBoxLayout()

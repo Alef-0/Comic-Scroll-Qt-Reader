@@ -12,10 +12,10 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 if __package__:
-    from .core.resources import APP_ICON_PATH, APP_NAME
+    from .core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
     from .ui.main_window import MainWindow
 else:
-    from comic_scroll_reader.core.resources import APP_ICON_PATH, APP_NAME
+    from comic_scroll_reader.core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
     from comic_scroll_reader.ui.main_window import MainWindow
 
 
@@ -81,9 +81,7 @@ def main():
     if is_desktop_file_installed("comic-scroll-reader"):
         QApplication.setDesktopFileName("comic-scroll-reader")
     app = QApplication(sys.argv)
-
-    app_icon = QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.exists() else QIcon.fromTheme("comic-scroll-reader")
-    app.setWindowIcon(app_icon)
+    app.setWindowIcon(get_app_icon())
 
     # Enable terminal interrupt (Ctrl+C) handling
     signal.signal(signal.SIGINT, lambda *_: app.quit())

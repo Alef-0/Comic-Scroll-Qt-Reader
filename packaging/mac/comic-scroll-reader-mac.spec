@@ -4,7 +4,10 @@
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
-ROOT_DIR = Path.cwd()
+# Resolve repository root robustly regardless of current working directory
+ROOT_DIR = Path(SPECPATH).resolve().parent.parent if 'SPECPATH' in globals() else Path.cwd()
+if not (ROOT_DIR / 'comic_scroll_reader').is_dir():
+    ROOT_DIR = Path.cwd()
 
 datas = [
     (str(ROOT_DIR / 'comic_scroll_reader' / 'assets' / 'csr_app_icon.png'), 'comic_scroll_reader/assets'),
@@ -107,6 +110,8 @@ app = BUNDLE(
         'CFBundleIdentifier': 'com.github.alef0.comic-scroll-reader',
         'CFBundleVersion': '1.1.0',
         'CFBundleShortVersionString': '1.1.0',
+        'CFBundleIconFile': 'csr_app_icon.icns',
+        'CFBundleIconName': 'csr_app_icon',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '11.0',
         'CFBundleDocumentTypes': [

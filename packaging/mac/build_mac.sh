@@ -26,6 +26,8 @@ fi
 echo "[1/3] Ensuring dependencies..."
 "$PYTHON_BIN" -m pip install -r "$PROJECT_ROOT/requirements.txt" pyinstaller pillow
 
+cd "$PROJECT_ROOT"
+
 echo "[2/3] Compiling .app bundle with PyInstaller..."
 "$PYTHON_BIN" -m PyInstaller \
     --distpath "$BUILD_DIR/pyinstaller_dist" \

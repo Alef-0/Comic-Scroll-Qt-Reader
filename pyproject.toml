@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comic-scroll-reader"
+version = "1.1.0"
+description = "Desktop reader for comic folders, CBZ/CBR books, webtoons, manga, and PDF documents."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Alef-0"}
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: Viewers",
+]
+dependencies = [
+    "PyQt6>=6.5.0",
+    "pypdfium2>=4.30.0",
+    "pillow>=10.0.0",
+    "rarfile>=4.0",
+]
+
+[project.scripts]
+comic-scroll-reader = "comic_scroll_reader.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["comic_scroll_reader*"]
+
+[tool.setuptools.package-data]
+comic_scroll_reader = ["assets/*"]

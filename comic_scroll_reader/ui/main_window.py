@@ -41,7 +41,7 @@ from ..core.models import (
     ViewerMode,
     natural_sort_key,
 )
-from ..core.resources import APP_ICON_PATH, APP_NAME
+from ..core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
 from ..core.settings import load_state, save_state
 from ..imaging.image_pipeline import DecodeResult, ImagePipeline
 from ..media.archive_handler import (
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
+        self.setWindowIcon(get_app_icon())
 
         # Image pipeline shared across both viewer widgets
         self._image_pipeline = ImagePipeline(self)
