@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-from typing import Optional
 
 from PyQt6.QtCore import QSize
 from PyQt6.QtGui import QIcon
@@ -107,4 +106,3 @@ def get_app_icon() -> QIcon:
 
 
 APP_ICON_PATH = find_app_icon_path()
-

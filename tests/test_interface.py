@@ -726,6 +726,16 @@ class TestMainWindowInterface(unittest.TestCase):
         window.shutdown()
         window.deleteLater()
 
+    def test_scroll_title_uses_rotated_page_dimensions(self):
+        window = MainWindow(target_path=self.temp_dir)
+        window.set_mode(ViewerMode.SCROLL)
+
+        window._rotate_current_page(90)
+
+        self.assertIn("(150x100)", window.windowTitle())
+        window.shutdown()
+        window.deleteLater()
+
     def test_save_current_page_exports_edits_without_overwriting_source(self):
         window = MainWindow(target_path=self.temp_dir)
         source_path = window.image_list[0]

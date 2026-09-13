@@ -19,9 +19,7 @@ from PyQt6.QtGui import (
     QDragLeaveEvent,
     QDragMoveEvent,
     QDropEvent,
-    QIcon,
     QKeyEvent,
-    QMouseEvent,
     QImage,
     QPixmap,
     QResizeEvent,
@@ -30,18 +28,14 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import QEvent, Qt, QSize, QTimer, pyqtSignal
 
-from ..controls.input_controls import (
-    CommonViewerControls,
-    KeyboardEventHandler,
-    MouseEventHandler,
-)
+from ..controls.input_controls import KeyboardEventHandler
 from ..core.models import (
     ComicMode,
     SUPPORTED_EXTENSIONS,
     ViewerMode,
     natural_sort_key,
 )
-from ..core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
+from ..core.resources import APP_NAME, get_app_icon
 from ..core.settings import load_state, save_state
 from ..imaging.image_pipeline import DecodeResult, ImagePipeline
 from ..media.archive_handler import (
@@ -1082,7 +1076,7 @@ class MainWindow(QMainWindow):
             return next((row for row in page_rows if index in row), (index,))
 
         if self._requested_index is not None:
-            spread = row_for_index(self._requested_index)
+            spread = self._requested_spread or row_for_index(self._requested_index)
             spreads = page_rows
             if len(spread) == 2:
                 name1 = self._display_name(self.image_list[spread[0]])
@@ -1150,8 +1144,8 @@ class MainWindow(QMainWindow):
             name1 = self._display_name(path1)
             name2 = self._display_name(path2)
             if self.viewer_mode == ViewerMode.SCROLL:
-                sz1 = self.scroll_reader._get_source_size(path1)
-                sz2 = self.scroll_reader._get_source_size(path2)
+                sz1 = self.scroll_reader.page_source_size(spread[0])
+                sz2 = self.scroll_reader.page_source_size(spread[1])
             else:
                 sz1 = self.image_viewer.source_size
                 sz2 = self.image_viewer.sec_source_size
@@ -1179,7 +1173,7 @@ class MainWindow(QMainWindow):
             path = self.image_list[self.current_index]
             filename = self._display_name(path)
             source_size = (
-                self.scroll_reader._get_source_size(path)
+                self.scroll_reader.page_source_size(self.current_index)
                 if self.viewer_mode == ViewerMode.SCROLL
                 else self.image_viewer.source_size
             )
@@ -1306,6 +1300,14 @@ class MainWindow(QMainWindow):
             return self._requested_index
         return self.current_index
 
+    def _active_render_spread(self, index: int) -> tuple[int, ...]:
+        """Return the displayed or pending row used by single-view rendering."""
+        if self.viewer_mode != ViewerMode.SINGLE:
+            return (index,)
+        if self._requested_index is not None and self._requested_spread:
+            return self._requested_spread
+        return self._get_spread_for_index(index)
+
     def _request_index(self, index: int, force: bool = False) -> bool:
         if not (0 <= index < len(self.image_list)):
             return False
@@ -1359,9 +1361,9 @@ class MainWindow(QMainWindow):
                         pixmap, _source_size, _path = base_preview
                         self._hud.set_thumbnail(idx, pixmap.toImage())
             if cached_pages and all(page is not None for page in cached_pages):
-                self._install_single_preview_pages(
+                self._install_single_navigation_pages(
+                    base_index,
                     [page for page in cached_pages if page is not None],
-                    reset_view=True,
                 )
                 QTimer.singleShot(
                     0,
@@ -1451,6 +1453,31 @@ class MainWindow(QMainWindow):
                 reset_view=reset_view,
             )
 
+    def _install_single_navigation_pages(
+        self,
+        target_index: int,
+        pages: list[tuple[QPixmap, QSize, str]],
+    ) -> None:
+        """Show a navigation fallback without losing an edge-scroll view."""
+        transition = self._single_scroll_transition
+        preserve_scroll = bool(
+            self.viewer_mode == ViewerMode.SINGLE
+            and transition is not None
+            and transition[0] == target_index
+        )
+        self._install_single_preview_pages(
+            pages,
+            reset_view=not preserve_scroll,
+        )
+        if preserve_scroll and transition is not None:
+            self._single_scroll_transition = None
+            _, zoom_factor, horizontal_ratio, at_top = transition
+            self.image_viewer.restore_scroll_position(
+                zoom_factor,
+                horizontal_ratio,
+                at_top,
+            )
+
     def _install_single_preview_results(
         self,
         spread: tuple[int, ...],
@@ -1526,10 +1553,26 @@ class MainWindow(QMainWindow):
             if all(
                 path in self._navigation_preview_results for path in expected_paths
             ):
-                self._install_single_preview_results(
-                    spread,
-                    self._navigation_preview_results,
-                    reset_view=True,
+                pages = []
+                for path in expected_paths:
+                    navigation_result = self._navigation_preview_results[path]
+                    image = self._transform_image_for_display(
+                        navigation_result.image,
+                        path,
+                    )
+                    pages.append(
+                        (
+                            QPixmap.fromImage(image),
+                            self._transformed_source_size(
+                                navigation_result.source_size,
+                                path,
+                            ),
+                            path,
+                        )
+                    )
+                self._install_single_navigation_pages(
+                    self._requested_index,
+                    pages,
                 )
                 self._navigation_preview_results.clear()
                 QTimer.singleShot(
@@ -1608,13 +1651,10 @@ class MainWindow(QMainWindow):
             self._prefetch_neighbours()
             return
 
-        if not (0 <= self.current_index < len(self.image_list)):
+        active_index = self._effective_index()
+        if not (0 <= active_index < len(self.image_list)):
             return
-        spread = (
-            self._get_spread_for_index(self.current_index)
-            if self.viewer_mode == ViewerMode.SINGLE
-            else (self.current_index,)
-        )
+        spread = self._active_render_spread(active_index)
         current_paths = {self.image_list[idx] for idx in spread}
         if request.path not in current_paths:
             return
@@ -1641,7 +1681,7 @@ class MainWindow(QMainWindow):
                 )
             if self.image_viewer.zoom_factor > 1.0:
                 self.image_viewer.set_full_resolution_pixmap(pixmap, request.path)
-                self._prefetch_neighbours()
+                self._prefetch_neighbours(active_index)
 
     def _on_image_failed(self, result: DecodeResult) -> None:
         request = result.request
@@ -1702,13 +1742,10 @@ class MainWindow(QMainWindow):
         self._show_load_error(failed_path, result.error)
 
     def _request_refined_preview(self, bounds: QSize) -> None:
-        if not (0 <= self.current_index < len(self.image_list)):
+        active_index = self._effective_index()
+        if not (0 <= active_index < len(self.image_list)):
             return
-        spread = (
-            self._get_spread_for_index(self.current_index)
-            if self.viewer_mode == ViewerMode.SINGLE
-            else (self.current_index,)
-        )
+        spread = self._active_render_spread(active_index)
         for idx in spread:
             path = self.image_list[idx]
             key = (path, bounds.width(), bounds.height())
@@ -1724,13 +1761,10 @@ class MainWindow(QMainWindow):
             )
 
     def _request_full_resolution(self) -> None:
-        if not (0 <= self.current_index < len(self.image_list)):
+        active_index = self._effective_index()
+        if not (0 <= active_index < len(self.image_list)):
             return
-        spread = (
-            self._get_spread_for_index(self.current_index)
-            if self.viewer_mode == ViewerMode.SINGLE
-            else (self.current_index,)
-        )
+        spread = self._active_render_spread(active_index)
         for idx in spread:
             path = self.image_list[idx]
             if not self.image_viewer.detail_needed(path):

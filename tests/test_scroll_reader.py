@@ -5,7 +5,16 @@ import shutil
 import tempfile
 import unittest
 
-from PyQt6.QtCore import QEventLoop, QObject, QPointF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEventLoop,
+    QObject,
+    QPointF,
+    QRect,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
@@ -686,6 +695,26 @@ class TestScrollReaderWidget(unittest.TestCase):
 
         self.assertEqual(self.widget.zoom_mode, "original")
         self.assertEqual(self.widget.image_rects[0].size(), source_size)
+
+    def test_hud_smart_fit_uses_complete_spread_width(self):
+        self.widget.set_layout_options(
+            double_page=True,
+            detect_double_spreads=False,
+        )
+        self.widget.scroll_to_index(1)
+
+        self.widget.toggle_smart_fit()
+        self.widget.toggle_smart_fit()
+
+        row = self.widget._current_row()
+        bounds = QRect(self.widget.image_rects[row[0]])
+        for index in row[1:]:
+            bounds = bounds.united(self.widget.image_rects[index])
+        self.assertEqual(row, (1, 2))
+        self.assertEqual(self.widget.zoom_mode, "width")
+        self.assertAlmostEqual(
+            bounds.width(), self.widget.viewport().width(), delta=2
+        )
 
     def test_drag_to_pan(self):
         """Mouse left drag translates the vertical scrollbar."""

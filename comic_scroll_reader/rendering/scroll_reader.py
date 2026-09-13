@@ -437,49 +437,78 @@ class ScrollReaderWidget(QAbstractScrollArea):
             self.zoom_changed.emit(self._zoom_factor)
             return
 
-        index = max(
-            0, min(self._current_visible_index, len(self._image_rects) - 1)
-        )
-        source_size = self._display_source_size(self._image_list[index])
         viewport_size = self._normalized_viewport_size()
-        wider_than_viewport = source_size.width() > viewport_size.width()
+        row = self._current_row(viewport_size)
+        native_size = self._native_row_size(row)
+        wider_than_viewport = native_size.width() > viewport_size.width()
         if wider_than_viewport:
             self._fit_current_row(width_only=True)
             target_mode = "width"
         else:
             for _ in range(3):
-                rect = self._image_rects[index]
-                if rect.width() <= 0:
+                bounds = QRect(self._image_rects[row[0]])
+                for row_index in row[1:]:
+                    bounds = bounds.united(self._image_rects[row_index])
+                if bounds.height() <= 0:
                     break
-                ratio = source_size.width() / rect.width()
+                ratio = native_size.height() / bounds.height()
                 if abs(ratio - 1.0) <= 0.005:
                     break
                 previous_zoom = self._zoom_factor
                 self.set_zoom(previous_zoom * ratio)
                 if abs(self._zoom_factor - previous_zoom) < 1e-6:
                     break
-            self.scroll_to_index(index)
+            self.scroll_to_index(row[0])
             target_mode = "original"
         self._zoom_mode = target_mode
         self.zoom_changed.emit(self._zoom_factor)
+
+    def _current_row(
+        self, viewport_size: Optional[QSize] = None
+    ) -> tuple[int, ...]:
+        """Return the comic row containing the current reading index."""
+        if not self._image_rects:
+            return ()
+        index = max(
+            0, min(self._current_visible_index, len(self._image_rects) - 1)
+        )
+        size = self._normalized_viewport_size(viewport_size)
+        return next(
+            (candidate for candidate in self.comic_rows(size) if index in candidate),
+            (index,),
+        )
+
+    def _native_row_size(self, row: tuple[int, ...]) -> QSize:
+        """Return the row's original-size geometry for smart-fit decisions."""
+        sizes = [
+            self._display_source_size(self._image_list[index]) for index in row
+        ]
+        if not sizes:
+            return QSize()
+        spacing = self.SPACING if self._page_spacing and len(sizes) > 1 else 0
+        native_height = max(size.height() for size in sizes)
+        if self._maintain_ratios or len(sizes) == 1:
+            native_width = sum(size.width() for size in sizes) + spacing
+        else:
+            native_width = int(
+                round(
+                    sum(
+                        size.width() * native_height / max(1, size.height())
+                        for size in sizes
+                    )
+                )
+            ) + spacing
+        return QSize(max(1, native_width), max(1, native_height))
 
     def _fit_current_row(self, *, width_only: bool) -> None:
         """Scale the current comic row to the viewport width or full window."""
         if not self._image_rects:
             return
 
-        index = max(
-            0, min(self._current_visible_index, len(self._image_rects) - 1)
-        )
         viewport_size = self._normalized_viewport_size()
-        row = next(
-            (
-                candidate
-                for candidate in self.comic_rows(viewport_size)
-                if index in candidate
-            ),
-            (index,),
-        )
+        row = self._current_row(viewport_size)
+        if not row:
+            return
 
         for _ in range(3):
             bounds = QRect(self._image_rects[row[0]])

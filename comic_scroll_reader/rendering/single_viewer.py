@@ -198,7 +198,6 @@ class ImageViewerWidget(QWidget):
         reset_view: bool = True,
     ) -> None:
         """Atomically replace the display preview without retaining the old full image."""
-        self._zoom_mode = "custom"
         self._preview_pixmap = pixmap
         self._full_pixmap = None
         self._source_size = QSize(source_size)
@@ -223,7 +222,6 @@ class ImageViewerWidget(QWidget):
         reset_view: bool = True,
     ) -> None:
         """Atomically install preview pixmaps for one page or two pages in a spread."""
-        self._zoom_mode = "custom"
         pix1, size1, path1 = first_page
         self._preview_pixmap = pix1
         self._full_pixmap = None

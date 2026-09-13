@@ -192,6 +192,26 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertEqual(self.viewer.source_size, QSize(4000, 3000))
         self.assertEqual(self.viewer.target_rect(), QRect(0, 0, 800, 600))
 
+    def test_preview_replacement_preserves_existing_zoom_mode_and_position(self):
+        self.viewer.set_preview_pixmap(
+            QPixmap(80, 120), QSize(1200, 1800), "page.png"
+        )
+        self.viewer.toggle_smart_fit()
+        self.viewer.pan_by(0.0, -120.0)
+        expected_zoom = self.viewer.zoom_factor
+        expected_pan = QPointF(self.viewer.pan_offset)
+
+        self.viewer.set_preview_pixmap(
+            QPixmap(400, 600),
+            QSize(1200, 1800),
+            "page.png",
+            reset_view=False,
+        )
+
+        self.assertEqual(self.viewer.zoom_mode, "width")
+        self.assertEqual(self.viewer.zoom_factor, expected_zoom)
+        self.assertEqual(self.viewer.pan_offset, expected_pan)
+
     def test_clear(self):
         """Verify clear() resets pixmap and path."""
         img = QImage(50, 50, QImage.Format.Format_RGB32)
@@ -781,6 +801,47 @@ class TestMainWindow(unittest.TestCase):
             window.image_viewer.pan_offset.x(), limits.x() * 0.5
         )
         self.assertEqual(window.image_viewer.pan_offset.y(), limits.y())
+        window.deleteLater()
+
+    def test_cached_navigation_fallback_immediately_preserves_scroll_position(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window._image_pipeline.wait_for_idle()
+        fallback = QPixmap(40, 60)
+        fallback.fill(QColor("cyan"))
+        window.scroll_reader._base_pixmaps[1] = fallback
+
+        requested = []
+        original_request_preview = window._image_pipeline.request_preview
+        window._image_pipeline.request_preview = (
+            lambda path, bounds, request_id, purpose, priority: requested.append(
+                (path, QSize(bounds), request_id, purpose, priority)
+            )
+        )
+        try:
+            window._scroll_single_page(1, 2.0, 0.5)
+
+            limits = window.image_viewer._pan_limits()
+            self.assertEqual(window.image_viewer.image_path, window.image_list[1])
+            self.assertEqual(window.image_viewer.pixmap().size(), QSize(40, 60))
+            self.assertEqual(window.image_viewer.zoom_factor, 2.0)
+            self.assertEqual(window.image_viewer.zoom_mode, "custom")
+            self.assertAlmostEqual(
+                window.image_viewer.pan_offset.x(), limits.x() * 0.5
+            )
+            self.assertEqual(window.image_viewer.pan_offset.y(), limits.y())
+            self.assertIsNone(window._single_scroll_transition)
+
+            window._request_full_resolution()
+        finally:
+            window._image_pipeline.request_preview = original_request_preview
+
+        detail_paths = [
+            path for path, _bounds, _request_id, purpose, _priority in requested
+            if purpose == "current-full"
+        ]
+        self.assertEqual(detail_paths, [window.image_list[1]])
+        window.shutdown()
         window.deleteLater()
 
     def test_initial_file_selects_correct_index(self):

@@ -8,14 +8,13 @@ import signal
 import sys
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 if __package__:
-    from .core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
+    from .core.resources import APP_NAME, get_app_icon
     from .ui.main_window import MainWindow
 else:
-    from comic_scroll_reader.core.resources import APP_ICON_PATH, APP_NAME, get_app_icon
+    from comic_scroll_reader.core.resources import APP_NAME, get_app_icon
     from comic_scroll_reader.ui.main_window import MainWindow
 
 
