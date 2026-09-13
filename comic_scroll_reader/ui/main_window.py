@@ -1531,6 +1531,14 @@ class MainWindow(QMainWindow):
             return
         if request.purpose == "prefetch-preview":
             return
+        if request.purpose.startswith("scroll-"):
+            if (
+                self.viewer_mode == ViewerMode.SCROLL
+                and 0 <= self.current_index < len(self.image_list)
+                and self.image_list[self.current_index] == request.path
+            ):
+                self.update_title()
+            return
         if request.request_id != self._request_generation:
             return
 

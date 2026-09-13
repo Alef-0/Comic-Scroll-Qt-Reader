@@ -80,6 +80,33 @@ def sample_pdf() -> Generator[str, None, None]:
         os.remove(pdf_path)
 
 
+@pytest.fixture
+def image_pdf() -> Generator[str, None, None]:
+    """Create a temporary PDF containing an embedded high-resolution image."""
+    import PIL.Image
+
+    doc = pdfium.PdfDocument.new()
+    page = doc.new_page(width=500, height=800)
+    pil_img = PIL.Image.new("RGB", (2500, 4000), color="blue")
+    pdf_img = pdfium.PdfImage.new(doc)
+    pdf_img.set_bitmap(pdfium.PdfBitmap.from_pil(pil_img))
+    pdf_img.transform(pdfium.PdfMatrix(500, 0, 0, 800, 0, 0))
+    page.insert_obj(pdf_img)
+    page.gen_content()
+    page.close()
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        pdf_path = f.name
+    doc.save(pdf_path)
+    doc.close()
+
+    yield pdf_path
+
+    close_all_pdf_handlers()
+    if os.path.exists(pdf_path):
+        os.remove(pdf_path)
+
+
 def test_is_pdf_file(sample_pdf: str):
     """Verify is_pdf_file detects PDF files and rejects non-PDFs."""
     assert is_pdf_file(sample_pdf) is True
@@ -418,6 +445,7 @@ def test_main_window_open_pdf(qapp: QApplication, sample_pdf: str):
     window.toggle_mode()
     assert window.viewer_mode == ViewerMode.SINGLE
 
+    window.shutdown()
     window.close()
 
 
@@ -426,3 +454,71 @@ def test_cli_parse_pdf():
     args = parse_arguments(["--debug", "comic_issue_01.pdf"])
     assert args.image_path == "comic_issue_01.pdf"
     assert args.debug is True
+
+
+def test_image_pdf_dimensions_and_preview(image_pdf: str):
+    """Verify that a PDF page with high-resolution image objects reports true image size on preview."""
+    handler = get_pdf_handler(image_pdf)
+    assert handler.page_count == 1
+
+    # Before preview, get_page_size returns the document-level page box
+    initial_size = handler.get_page_size(0)
+    assert initial_size == QSize(500, 800)
+
+    # Render preview with bounds (e.g. 500x800)
+    img, source_size, err = render_pdf_page(image_pdf, 0, bounds=QSize(500, 800))
+    assert err == ""
+    assert not img.isNull()
+    # Preview is bounded to requested bounds (500x800)
+    assert img.width() == 500
+    assert img.height() == 800
+    # But source_size accurately reports the 2500x4000 native image dimension
+    assert source_size == QSize(2500, 4000)
+    assert handler.get_page_size(0) == QSize(2500, 4000)
+
+    # When rendered without bounds (full native render), it scales to native resolution
+    img_full = handler.render_page(0)
+    assert not img_full.isNull()
+    assert img_full.width() == 2500
+    assert img_full.height() == 4000
+
+
+def test_image_pdf_scroll_and_window(qapp: QApplication, image_pdf: str):
+    """Verify MainWindow and ScrollReader display the genuine image dimension."""
+    reader = ScrollReaderWidget()
+    reader.resize(1000, 800)
+    page_uris = [build_pdf_page_uri(image_pdf, 0)]
+    reader.set_images(page_uris)
+
+    # Before render, page_source_size returns initial document box
+    assert reader.page_source_size(0) == QSize(500, 800)
+
+    # Decode preview
+    img, source_size, err = render_pdf_page(image_pdf, 0, bounds=QSize(500, 800))
+    assert source_size == QSize(2500, 4000)
+
+    # Deliver decode result to scroll reader
+    from comic_scroll_reader.imaging.image_pipeline import DecodeRequest
+    request = DecodeRequest(0, page_uris[0], "scroll-0", QSize(500, 800), (page_uris[0],))
+    result = DecodeResult(request, img, source_size, "")
+    reader._on_image_ready(result)
+
+    # page_source_size must now be updated to 2500x4000
+    assert reader.page_source_size(0) == QSize(2500, 4000)
+    reader.clear()
+
+    # Verify MainWindow
+    window = MainWindow(target_path=image_pdf)
+    window.resize(1280, 720)
+    loop = QEventLoop()
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    window.image_loaded.connect(lambda _: loop.quit())
+    timer.start(3000)
+    loop.exec()
+
+    assert "(2500x4000)" in window.windowTitle()
+    window.shutdown()
+    window.close()
+

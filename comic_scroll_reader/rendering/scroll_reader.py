@@ -1274,6 +1274,13 @@ class ScrollReaderWidget(QAbstractScrollArea):
             )
 
     def _on_base_image_ready(self, result: DecodeResult) -> None:
+        if (
+            result.source_size.isValid()
+            and result.source_size.width() > 0
+            and result.source_size.height() > 0
+        ):
+            self._image_sizes[result.request.path] = result.source_size
+
         idx = result.request.request_id
         if not (
             idx in self._base_pending_indices
@@ -1296,6 +1303,13 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def _on_image_ready(self, result: DecodeResult) -> None:
         """Receive decoded preview from ImagePipeline and repaint."""
         request = result.request
+        if (
+            result.source_size.isValid()
+            and result.source_size.width() > 0
+            and result.source_size.height() > 0
+        ):
+            self._image_sizes[request.path] = result.source_size
+
         if request.purpose.startswith("scroll-base-"):
             self._on_base_image_ready(result)
             return

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import ctypes
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QSize, Qt
@@ -15,8 +16,10 @@ from PyQt6.QtGui import QImage
 
 try:
     import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
 except ImportError:
     pdfium = None  # type: ignore
+    pdfium_c = None  # type: ignore
 
 
 MIB = 1024 * 1024
@@ -68,14 +71,104 @@ class PdfDocumentHandler:
             # Opening every page just to query its size makes PDFium retain large
             # image streams for image-only PDFs.
             width, height = self._doc.get_page_size(page_index)
-            size = QSize(max(1, int(round(width))), max(1, int(round(height))))
-
-            self._sizes_cache[page_index] = size
-            return size
+            return QSize(max(1, int(round(width))), max(1, int(round(height))))
 
     def get_all_page_sizes(self) -> List[QSize]:
         """Return dimensions for all pages in the PDF."""
         return [self.get_page_size(i) for i in range(self._page_count)]
+
+    def _collect_image_entries(
+        self, container, pw: float, ph: float, depth: int = 0, max_depth: int = 3
+    ) -> List[Tuple[int, int, float, float]]:
+        """Recursively collect image object pixel sizes and page bounds from a page or form."""
+        if depth > max_depth or pdfium_c is None:
+            return []
+
+        if depth == 0:
+            count_fn = getattr(pdfium_c, "FPDFPage_CountObjects", None)
+            get_fn = getattr(pdfium_c, "FPDFPage_GetObject", None)
+        else:
+            count_fn = getattr(pdfium_c, "FPDFFormObj_CountObjects", None)
+            get_fn = getattr(pdfium_c, "FPDFFormObj_GetObject", None)
+
+        if count_fn is None or get_fn is None:
+            return []
+
+        n = count_fn(container)
+        if n < 0:
+            return []
+
+        entries: List[Tuple[int, int, float, float]] = []
+        for j in range(n):
+            raw = get_fn(container, j)
+            if not raw:
+                continue
+            obj_type = pdfium_c.FPDFPageObj_GetType(raw)
+            if obj_type == getattr(pdfium_c, "FPDF_PAGEOBJ_IMAGE", 3):
+                w, h = ctypes.c_uint(), ctypes.c_uint()
+                if pdfium_c.FPDFImageObj_GetImagePixelSize(raw, w, h):
+                    img_w, img_h = w.value, h.value
+                    if img_w > 0 and img_h > 0:
+                        l = ctypes.c_float()
+                        b = ctypes.c_float()
+                        r = ctypes.c_float()
+                        t = ctypes.c_float()
+                        if pdfium_c.FPDFPageObj_GetBounds(raw, l, b, r, t):
+                            bw = abs(r.value - l.value)
+                            bh = abs(t.value - b.value)
+                        else:
+                            bw, bh = pw, ph
+                        entries.append((img_w, img_h, bw, bh))
+            elif obj_type == getattr(pdfium_c, "FPDF_PAGEOBJ_FORM", 4):
+                entries.extend(
+                    self._collect_image_entries(
+                        raw, pw, ph, depth=depth + 1, max_depth=max_depth
+                    )
+                )
+        return entries
+
+    def _extract_page_dimensions(self, page, pw: float, ph: float) -> QSize:
+        """Inspect page objects to detect underlying image resolution.
+
+        If the page contains image objects, return their effective pixel
+        dimensions matching the page's aspect ratio and orientation.
+        Otherwise, fall back to native PDF point dimensions.
+        """
+        fallback = QSize(max(1, int(round(pw))), max(1, int(round(ph))))
+        if pdfium_c is None or page is None:
+            return fallback
+
+        try:
+            image_entries = self._collect_image_entries(page, pw, ph)
+            if not image_entries:
+                return fallback
+
+            # If there is a single primary image covering the bulk of the page:
+            if len(image_entries) == 1:
+                img_w, img_h, bw, bh = image_entries[0]
+                if bw >= pw * 0.8 and bh >= ph * 0.8:
+                    if (pw > ph) != (img_w > img_h):
+                        img_w, img_h = img_h, img_w
+                    return QSize(max(1, img_w), max(1, img_h))
+
+            # If multiple images (or partial images), determine maximum pixel density
+            scales = []
+            for img_w, img_h, bw, bh in image_entries:
+                if bw > 5.0 and bh > 5.0:
+                    scales.append(max(img_w / bw, img_h / bh))
+                elif pw > 0 and ph > 0:
+                    scales.append(max(img_w / pw, img_h / ph))
+
+            if scales:
+                max_scale = max(scales)
+                if max_scale > 1.0:
+                    eff_w = max(1, int(round(pw * max_scale)))
+                    eff_h = max(1, int(round(ph * max_scale)))
+                    return QSize(eff_w, eff_h)
+
+            return fallback
+        except Exception:
+            return fallback
 
     def render_page(
         self,
@@ -105,16 +198,27 @@ class PdfDocumentHandler:
                     if pw <= 0 or ph <= 0:
                         pw, ph = 600.0, 800.0
 
+                    detected_size = self._extract_page_dimensions(page, pw, ph)
+                    self._sizes_cache[page_index] = detected_size
+
+                    native_w = detected_size.width()
+                    native_scale = native_w / pw if pw > 0 else 1.0
+
                     if bounds is not None and bounds.isValid() and bounds.width() > 0 and bounds.height() > 0:
                         scaled = QSize(int(round(pw)), int(round(ph))).scaled(
                             bounds, Qt.AspectRatioMode.KeepAspectRatio
                         )
                         render_scale = scaled.width() / pw
+                        if native_w > int(round(pw)):
+                            render_scale = min(render_scale, native_scale)
                     elif scale is not None and scale > 0:
                         render_scale = scale
                     else:
-                        # Default render scale 2.0 (~144 DPI) for crisp viewing
-                        render_scale = 2.0
+                        if native_w > int(round(pw)):
+                            render_scale = native_scale
+                        else:
+                            # Default render scale 2.0 (~144 DPI) for crisp viewing
+                            render_scale = 2.0
 
                     # Cap scale to avoid pathological memory allocations (max 8192px on any dimension)
                     max_dim = max(pw * render_scale, ph * render_scale)
@@ -270,8 +374,8 @@ def render_pdf_page(
     """Render a PDF page for worker threads, returning (image, source_size, error_message)."""
     try:
         handler = get_pdf_handler(pdf_path)
-        source_size = handler.get_page_size(page_index)
         image = handler.render_page(page_index, bounds=bounds)
+        source_size = handler.get_page_size(page_index)
         return image, source_size, ""
     except Exception as e:
         return QImage(), QSize(), str(e)
