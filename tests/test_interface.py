@@ -648,7 +648,7 @@ class TestMainWindowInterface(unittest.TestCase):
         self.assertTrue(window._directional_pan_action.isChecked())
         self.assertTrue(window._double_spread_action.isChecked())
         self.assertTrue(menus["&View"].toolTipsVisible())
-        self.assertIn("Wide Pages (>75% at Fit Height)", view_actions)
+        self.assertIn("Wide Pages (>50% at Fit Height)", view_actions)
         self.assertIn("90% or more", window._double_spread_action.toolTip())
         self.assertIn("Fit &Window", view_actions)
         self.assertIn("Maintain ratios in scroll", view_actions)

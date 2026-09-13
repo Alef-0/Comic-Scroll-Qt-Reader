@@ -474,7 +474,7 @@ class TestScrollReaderWidget(unittest.TestCase):
     def test_horizontal_detection_uses_fit_height_screen_coverage(self):
         paths = []
         for index, (width, height) in enumerate(
-            [(1000, 2000), (1000, 800), (130, 150)]
+            [(1000, 2000), (1000, 800), (70, 150)]
         ):
             path = os.path.join(self.temp_dir, f"ratio_{index}.png")
             image = QImage(width, height, QImage.Format.Format_RGB32)
@@ -492,9 +492,9 @@ class TestScrollReaderWidget(unittest.TestCase):
             {1},
         )
 
-    def test_horizontal_detection_uses_strict_seventy_five_percent_cutoff(self):
+    def test_horizontal_detection_uses_strict_fifty_percent_cutoff(self):
         paths = []
-        for index, width in enumerate((600, 601)):
+        for index, width in enumerate((400, 401)):
             path = os.path.join(self.temp_dir, f"cutoff_{index}.png")
             image = QImage(width, 600, QImage.Format.Format_RGB32)
             image.fill(QColor("cyan"))
@@ -535,7 +535,7 @@ class TestScrollReaderWidget(unittest.TestCase):
     def test_comic_rows_allow_pairing_down_to_ninety_percent_height(self):
         paths = []
         for index, (width, height) in enumerate(
-            [(100, 150), (1000, 1000), (1000, 1000)]
+            [(100, 150), (640, 690), (640, 690)]
         ):
             path = os.path.join(self.temp_dir, f"tolerant_pair_{index}.png")
             image = QImage(width, height, QImage.Format.Format_RGB32)
@@ -604,6 +604,26 @@ class TestScrollReaderWidget(unittest.TestCase):
             [rects[index].height() for index in (1, 2, 3)],
             [690, 690, 690],
         )
+
+    def test_comic_rows_uses_display_resolution_ignoring_narrow_viewport(self):
+        paths = []
+        for index in range(3):
+            path = os.path.join(self.temp_dir, f"display_pair_{index}.png")
+            image = QImage(800, 1200, QImage.Format.Format_RGB32)
+            image.fill(QColor("magenta"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.resize(350, 400)
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True, page_spacing=True
+        )
+        self.widget.set_images(paths)
+
+        # Spreads must be computed against display resolution, not the 350x400 widget size
+        self.assertEqual(self.widget.comic_rows(), [(0,), (1, 2)])
+        rects = self.widget.image_rects
+        self.assertEqual(rects[1].y(), rects[2].y())
 
     def test_comic_rows_pair_only_pages_that_fit_height_together(self):
         paths = []

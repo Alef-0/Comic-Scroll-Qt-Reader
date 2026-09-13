@@ -569,12 +569,12 @@ class MainWindow(QMainWindow):
         )
 
     def _double_spread_indices(self) -> Set[int]:
-        return self.scroll_reader.horizontal_page_indices(self.image_viewer.size())
+        return self.scroll_reader.horizontal_page_indices()
 
     def _compute_spreads(self) -> List[tuple[int, ...]]:
         if not self.image_list:
             return []
-        return self.scroll_reader.comic_rows(self.image_viewer.size())
+        return self.scroll_reader.comic_rows()
 
     def _get_spread_for_index(self, index: int) -> tuple[int, ...]:
         if not (0 <= index < len(self.image_list)):
@@ -1981,13 +1981,13 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._page_spacing_action)
 
         self._double_spread_action = QAction(
-            "Wide Pages (>75% at Fit Height)", self
+            "Wide Pages (>50% at Fit Height)", self
         )
         self._double_spread_action.setCheckable(True)
         self._double_spread_action.setChecked(True)
         self._double_spread_action.setToolTip(
-            "Keep pages wider than 75% alone; pair narrower pages when they "
-            "fit at 90% or more of the window height"
+            "Keep pages wider than 50% alone; pair narrower pages when they "
+            "fit at 90% or more of display height"
         )
         self._double_spread_action.setStatusTip(
             self._double_spread_action.toolTip()

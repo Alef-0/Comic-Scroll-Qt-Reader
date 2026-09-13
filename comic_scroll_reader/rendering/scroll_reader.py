@@ -18,7 +18,7 @@ from PyQt6.QtGui import (
     QShowEvent,
     QWheelEvent,
 )
-from PyQt6.QtWidgets import QAbstractScrollArea
+from PyQt6.QtWidgets import QAbstractScrollArea, QApplication
 
 from ..controls.input_controls import CommonViewerControls
 from ..imaging.gif_animation import GifAnimation, is_gif_path
@@ -58,7 +58,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
     PIXMAP_CACHE_BYTES = 64 * MIB
     BASE_PIXMAP_CACHE_BYTES = 32 * MIB
     BASE_PREVIEW_MAX_WIDTH = 128
-    HORIZONTAL_FIT_WIDTH_RATIO = 0.75
+    HORIZONTAL_FIT_WIDTH_RATIO = 0.50
     MIN_PAIRED_HEIGHT_RATIO = 0.90
 
     def __init__(self, parent=None, pipeline: Optional[ImagePipeline] = None):
@@ -472,9 +472,12 @@ class ScrollReaderWidget(QAbstractScrollArea):
         index = max(
             0, min(self._current_visible_index, len(self._image_rects) - 1)
         )
-        size = self._normalized_viewport_size(viewport_size)
         return next(
-            (candidate for candidate in self.comic_rows(size) if index in candidate),
+            (
+                candidate
+                for candidate in self.comic_rows(viewport_size)
+                if index in candidate
+            ),
             (index,),
         )
 
@@ -681,7 +684,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         viewport_size = QSize(viewport_width, viewport_height)
         row_layouts = []
 
-        for row in self.comic_rows(viewport_size):
+        for row in self.comic_rows():
             if len(row) == 1:
                 index = row[0]
                 source_size = self._display_source_size(self._image_list[index])
@@ -810,7 +813,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def _layout_native_rows(
         self, viewport_width: int, viewport_size: QSize, spacing: int
     ) -> tuple[int, int]:
-        rows = self.comic_rows(viewport_size)
+        rows = self.comic_rows()
         row_sizes = []
         for row in rows:
             sizes = [
@@ -893,13 +896,40 @@ class ScrollReaderWidget(QAbstractScrollArea):
         available_width = max(1.0, viewport_size.width() - spacing)
         return min(1.0, available_width / max(1.0, combined_width))
 
+    def _display_resolution(self) -> QSize:
+        screen = self.screen()
+        if screen is not None:
+            size = screen.size()
+            if size.isValid() and size.width() > 0 and size.height() > 0:
+                return size
+        app = QApplication.instance()
+        if app is not None and isinstance(app, QApplication):
+            primary = app.primaryScreen()
+            if primary is not None:
+                size = primary.size()
+                if size.isValid() and size.width() > 0 and size.height() > 0:
+                    return size
+        return QSize(1920, 1080)
+
+    def _reference_display_size(
+        self, display_size: Optional[QSize] = None
+    ) -> QSize:
+        if (
+            display_size is not None
+            and display_size.isValid()
+            and display_size.width() > 0
+            and display_size.height() > 0
+        ):
+            return QSize(display_size)
+        return self._display_resolution()
+
     def horizontal_page_indices(
-        self, viewport_size: Optional[QSize] = None
+        self, display_size: Optional[QSize] = None
     ) -> Set[int]:
-        """Return pages covering over 75% width when fitted to viewport height."""
+        """Return pages covering over 50% width when fitted to display height."""
         if not self._detect_double_spreads or not self._image_list:
             return set()
-        size = self._normalized_viewport_size(viewport_size)
+        size = self._reference_display_size(display_size)
         threshold = size.width() * self.HORIZONTAL_FIT_WIDTH_RATIO
         return {
             index
@@ -908,15 +938,17 @@ class ScrollReaderWidget(QAbstractScrollArea):
         }
 
     def comic_rows(
-        self, viewport_size: Optional[QSize] = None
+        self, display_size: Optional[QSize] = None
     ) -> List[tuple[int, ...]]:
-        """Group comic pages into height-fit rows containing at most two pages."""
+        """Group comic pages into height-fit rows containing at most two pages,
+        calculated against fullscreen display resolution so spreads stay together.
+        """
         if not self._image_list:
             return []
         if not self._double_page:
             return [(index,) for index in range(len(self._image_list))]
 
-        size = self._normalized_viewport_size(viewport_size)
+        size = self._reference_display_size(display_size)
         horizontal_indices = self.horizontal_page_indices(size)
         rows: List[tuple[int, ...]] = [(0,)]
         index = 1

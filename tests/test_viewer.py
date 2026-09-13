@@ -1311,7 +1311,7 @@ class TestSpreadSingleViewer(unittest.TestCase):
 
         window.deleteLater()
 
-    def test_single_mode_reloads_spread_when_resize_changes_grouping(self):
+    def test_single_mode_retains_spread_when_viewer_resized(self):
         from comic_scroll_reader.core.models import ComicMode
 
         window = MainWindow(target_path=self.temp_dir)
@@ -1324,7 +1324,7 @@ class TestSpreadSingleViewer(unittest.TestCase):
             wait_for_signal(
                 window.image_loaded,
                 lambda: window.current_index == 1
-                and not window.image_viewer.is_spread(),
+                and window.image_viewer.is_spread(),
             )
         )
 
@@ -1344,7 +1344,7 @@ class TestSpreadSingleViewer(unittest.TestCase):
             wait_for_signal(
                 window.image_loaded,
                 lambda: window.current_index == 1
-                and not window.image_viewer.is_spread(),
+                and window.image_viewer.is_spread(),
             )
         )
         window.shutdown()
