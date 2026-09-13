@@ -703,6 +703,37 @@ class TestMainWindow(unittest.TestCase):
         window.shutdown()
         window.deleteLater()
 
+    def test_single_preview_target_survives_immediate_switch_to_scroll(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window._image_pipeline.wait_for_idle()
+        fallback = QPixmap(40, 60)
+        fallback.fill(QColor("cyan"))
+        window.scroll_reader._base_pixmaps[1] = fallback
+
+        requested = []
+        original_request_preview = window._image_pipeline.request_preview
+        window._image_pipeline.request_preview = (
+            lambda path, bounds, request_id, purpose, priority: requested.append(
+                (path, QSize(bounds), request_id, purpose, priority)
+            )
+        )
+        try:
+            window.go_to_index(1)
+            self.assertEqual(window.current_index, 0)
+            self.assertEqual(window._requested_index, 1)
+            self.assertEqual(window.image_viewer.image_path, window.image_list[1])
+
+            window.set_mode(ViewerMode.SCROLL)
+        finally:
+            window._image_pipeline.request_preview = original_request_preview
+
+        self.assertEqual(window.current_index, 1)
+        self.assertIsNone(window._requested_index)
+        self.assertEqual(window.scroll_reader.current_visible_index(), 1)
+        window.shutdown()
+        window.deleteLater()
+
     def test_single_to_scroll_preserves_page_scale_and_centre_point(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
@@ -1138,6 +1169,14 @@ class TestSpreadSingleViewer(unittest.TestCase):
         self.assertEqual(
             sum(request[3] == "current-preview" for request in requested),
             2,
+        )
+        self.assertEqual(
+            {
+                request[0]
+                for request in requested
+                if request[3] == "prefetch-preview"
+            },
+            {window.image_list[index] for index in (0, 3, 4)},
         )
 
         window.shutdown()

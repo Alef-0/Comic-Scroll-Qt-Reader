@@ -70,6 +70,7 @@ class ViewerHud(QWidget):
     FADE_DURATION_MS = 350
     ACTIVATION_MARGIN = 28
     EDGE_MARGIN = 24
+    MIN_RESPONSIVE_SCALE_PERCENT = 55
     THUMBNAIL_STRIP_WIDTH = 880
     THUMBNAIL_FILMSTRIP_HEIGHT = 206
     THUMBNAIL_SIDEBAR_WIDTH = 174
@@ -91,10 +92,12 @@ class ViewerHud(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._is_mouse_inside = False
         self._is_pointer_in_activation_band = False
+        self._is_pointer_in_thumbnail_band = False
         self._fade_target_visible = False
         self._at_top = False
         self._thumbnail_layout = "vertical"
         self._hud_scale_percent = 100
+        self._effective_hud_scale_percent = 100
         self._is_adjusting_hud_scale = False
         self._page_count = 0
         self._display_total_pages = 0
@@ -156,6 +159,10 @@ class ViewerHud(QWidget):
             "}"
             "QPushButton:pressed, QToolButton:pressed {"
             "  background-color: rgba(255, 255, 255, 0.25);"
+            "}"
+            "QPushButton#thumbnailToggle:checked {"
+            "  background-color: rgba(74, 144, 226, 0.18);"
+            "  border: 2px solid #4a90e2;"
             "}"
             "QPushButton:disabled, QToolButton:disabled {"
             "  color: #555555;"
@@ -302,6 +309,7 @@ class ViewerHud(QWidget):
         pill_layout.addWidget(self._make_separator())
 
         self.btn_thumbnails = QPushButton("▦", self.pill)
+        self.btn_thumbnails.setObjectName("thumbnailToggle")
         self.btn_thumbnails.setCheckable(True)
         self.btn_thumbnails.setChecked(False)
         self.btn_thumbnails.setToolTip("Show or hide page thumbnails")
@@ -515,21 +523,37 @@ class ViewerHud(QWidget):
         self._hud_size_slider.setValue(percent)
         self._hud_size_slider.blockSignals(previous)
         self._hud_scale_percent = percent
-        self._apply_hud_scale()
+        parent = self.parentWidget()
+        if parent is None:
+            self._effective_hud_scale_percent = percent
+            self._apply_hud_scale()
+        else:
+            self.reposition(parent.width(), parent.height())
 
     def hud_scale(self) -> int:
         return self._hud_scale_percent
+
+    def effective_hud_scale(self) -> int:
+        """Return the scale currently rendered after fitting the window width."""
+        return self._effective_hud_scale_percent
 
     def _on_hud_scale_changed(self, percent: int) -> None:
         slider_anchor = None
         if self._is_adjusting_hud_scale:
             slider_anchor = self._hud_size_slider.mapToGlobal(QPoint(0, 0))
         self._hud_scale_percent = percent
-        self._apply_hud_scale()
+        parent = self.parentWidget()
+        if parent is None:
+            self._effective_hud_scale_percent = percent
+            self._apply_hud_scale()
+        else:
+            self._fit_hud_to_width(parent.width())
         if slider_anchor is not None:
             current_anchor = self._hud_size_slider.mapToGlobal(QPoint(0, 0))
             offset = slider_anchor - current_anchor
             self.move(self.x() + offset.x(), self.y() + offset.y())
+        elif parent is not None:
+            self.reposition(parent.width(), parent.height())
         self.hud_scale_changed.emit(percent)
 
     def _begin_hud_scale_adjustment(self) -> None:
@@ -542,12 +566,16 @@ class ViewerHud(QWidget):
         parent = self.parentWidget()
         if parent is not None:
             self.reposition(parent.width(), parent.height())
-        if not self._is_mouse_inside and not self._is_pointer_in_activation_band:
+        if (
+            not self._is_mouse_inside
+            and not self._is_pointer_in_activation_band
+            and not self._is_pointer_in_thumbnail_band
+        ):
             self._hide_timer.start()
 
     def _apply_hud_scale(self) -> None:
-        scale = self._hud_scale_percent / 100.0
-        font_size = max(10, int(round(13 * scale)))
+        scale = self._effective_hud_scale_percent / 100.0
+        font_size = max(8, int(round(13 * scale)))
         vertical_padding = max(2, int(round(4 * scale)))
         horizontal_padding = max(5, int(round(8 * scale)))
         minimum_height = max(20, int(round(24 * scale)))
@@ -574,6 +602,10 @@ class ViewerHud(QWidget):
             "}"
             "QPushButton:pressed, QToolButton:pressed {"
             "  background-color: rgba(255, 255, 255, 0.25);"
+            "}"
+            "QPushButton#thumbnailToggle:checked {"
+            "  background-color: rgba(74, 144, 226, 0.18);"
+            "  border: 2px solid #4a90e2;"
             "}"
             "QPushButton:disabled, QToolButton:disabled { color: #555555; }"
             f"QLabel {{ color: #888888; font-size: {font_size}px; }}"
@@ -603,10 +635,31 @@ class ViewerHud(QWidget):
             "color: #ffffff;"
         )
         self._hud_size_label.setText(f"HUD: {self._hud_scale_percent}%")
+        self._hud_size_slider.setFixedWidth(max(64, int(round(110 * scale))))
         self._refresh_layout_geometry()
-        parent = self.parentWidget()
-        if parent is not None:
-            self.reposition(parent.width(), parent.height())
+
+    def _fit_hud_to_width(self, parent_width: int) -> None:
+        """Shrink the rendered HUD as needed while retaining the chosen scale."""
+        available_width = max(1, parent_width - (2 * self.EDGE_MARGIN))
+        candidate = self._hud_scale_percent
+        self._effective_hud_scale_percent = candidate
+        self._apply_hud_scale()
+
+        # Font metrics and per-widget padding round independently, so allow a
+        # few convergence passes rather than trusting one proportional step.
+        for _attempt in range(8):
+            current_width = self.sizeHint().width()
+            if current_width <= available_width:
+                break
+            fitted = int(candidate * available_width / max(1, current_width))
+            candidate = max(
+                self.MIN_RESPONSIVE_SCALE_PERCENT,
+                min(candidate - 1, fitted),
+            )
+            self._effective_hud_scale_percent = candidate
+            self._apply_hud_scale()
+            if candidate == self.MIN_RESPONSIVE_SCALE_PERCENT:
+                break
 
     def set_at_top(self, at_top: bool) -> None:
         self._at_top = bool(at_top)
@@ -762,7 +815,7 @@ class ViewerHud(QWidget):
             metrics.horizontalAdvance(widest_text),
             metrics.horizontalAdvance(self.btn_page.text()),
         )
-        scale = self._hud_scale_percent / 100.0
+        scale = self._effective_hud_scale_percent / 100.0
         horizontal_padding = max(7, int(round(10 * scale)))
         self.btn_page.setMinimumWidth(text_width + (2 * horizontal_padding) + 4)
         self.adjustSize()
@@ -839,7 +892,7 @@ class ViewerHud(QWidget):
 
     def reposition(self, parent_width: int, parent_height: int):
         """Center the HUD horizontally near the configured viewer edge."""
-        self._refresh_layout_geometry()
+        self._fit_hud_to_width(parent_width)
         w = self.sizeHint().width()
         h = self.sizeHint().height()
         x = max(0, (parent_width - w) // 2)
@@ -916,19 +969,40 @@ class ViewerHud(QWidget):
         for index in tuple(self._thumbnail_source_images):
             self._render_thumbnail(index)
 
-    def on_pointer_move(self, parent_y: int) -> None:
-        """Reveal the HUD only while the pointer is near its vertical level."""
+    def on_pointer_move(self, parent_y: int, parent_x: Optional[int] = None) -> None:
+        """Reveal controls from the HUD edge or the enabled thumbnail edge."""
         band_top = self.y() - self.ACTIVATION_MARGIN
         band_bottom = self.y() + self.height() + self.ACTIVATION_MARGIN
         is_in_band = band_top <= parent_y <= band_bottom
+        is_in_thumbnail_band = False
+        if parent_x is not None and self.btn_thumbnails.isChecked():
+            panel = self.thumbnail_list.geometry()
+            if self._thumbnail_layout == "vertical":
+                is_in_thumbnail_band = (
+                    -self.ACTIVATION_MARGIN
+                    <= parent_x
+                    <= panel.right() + self.ACTIVATION_MARGIN
+                    and panel.top() - self.ACTIVATION_MARGIN
+                    <= parent_y
+                    <= panel.bottom() + self.ACTIVATION_MARGIN
+                )
+            else:
+                is_in_thumbnail_band = panel.adjusted(
+                    -self.ACTIVATION_MARGIN,
+                    -self.ACTIVATION_MARGIN,
+                    self.ACTIVATION_MARGIN,
+                    self.ACTIVATION_MARGIN,
+                ).contains(parent_x, parent_y)
         if (
             is_in_band == self._is_pointer_in_activation_band
-            and not (is_in_band and self.isHidden())
+            and is_in_thumbnail_band == self._is_pointer_in_thumbnail_band
+            and not ((is_in_band or is_in_thumbnail_band) and self.isHidden())
         ):
             return
 
         self._is_pointer_in_activation_band = is_in_band
-        if is_in_band:
+        self._is_pointer_in_thumbnail_band = is_in_thumbnail_band
+        if is_in_band or is_in_thumbnail_band:
             self._show_with_fade()
         elif not self.isHidden() and not self._is_mouse_inside:
             self._hide_timer.start()
@@ -970,6 +1044,7 @@ class ViewerHud(QWidget):
         if (
             not self._is_mouse_inside
             and not self._is_pointer_in_activation_band
+            and not self._is_pointer_in_thumbnail_band
             and not self._is_adjusting_hud_scale
         ):
             self._fade_out()

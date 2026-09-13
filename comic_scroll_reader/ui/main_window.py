@@ -403,13 +403,14 @@ class MainWindow(QMainWindow):
         if self.viewer_mode == mode:
             return
 
+        target_index = self._effective_index()
         single_page_view = None
         if (
             mode == ViewerMode.SCROLL
-            and 0 <= self.current_index < len(self.image_list)
+            and 0 <= target_index < len(self.image_list)
         ):
             single_page_view = self.image_viewer.page_view_snapshot(
-                self.image_list[self.current_index]
+                self.image_list[target_index]
             )
 
         self._single_scroll_transition = None
@@ -427,6 +428,7 @@ class MainWindow(QMainWindow):
             # Sync active index from single image viewer to scroll reader
             self._request_generation += 1
             self._requested_index = None
+            self._requested_spread = ()
             self._full_request_keys.clear()
             self._refine_request_keys.clear()
             self._spread_pending_results.clear()
@@ -444,12 +446,13 @@ class MainWindow(QMainWindow):
             self.image_viewer.release_render_cache()
             self._stack.setCurrentWidget(self.scroll_reader)
             self.scroll_reader.setFocus()
-            if 0 <= self.current_index < len(self.image_list):
-                self.scroll_reader.scroll_to_index(self.current_index)
+            if 0 <= target_index < len(self.image_list):
+                self.current_index = target_index
+                self.scroll_reader.scroll_to_index(target_index)
                 if single_page_view is not None:
                     displayed_size, focus = single_page_view
                     self.scroll_reader.restore_page_view(
-                        self.current_index, displayed_size, focus
+                        target_index, displayed_size, focus
                     )
 
         self.update_title()
@@ -1364,7 +1367,7 @@ class MainWindow(QMainWindow):
                     0,
                     lambda generation=self._request_generation,
                     requested_spread=spread,
-                    requested_bounds=QSize(bounds): self._request_current_previews(
+                    requested_bounds=QSize(bounds): self._start_single_quality_requests(
                         generation,
                         requested_spread,
                         requested_bounds,
@@ -1386,6 +1389,21 @@ class MainWindow(QMainWindow):
                 bounds,
             )
         return True
+
+    def _start_single_quality_requests(
+        self,
+        generation: int,
+        spread: tuple[int, ...],
+        bounds: QSize,
+    ) -> None:
+        """Prioritize the visible sharp page, then begin nearby preloading."""
+        self._request_current_previews(generation, spread, bounds)
+        if (
+            generation == self._request_generation
+            and self.viewer_mode == ViewerMode.SINGLE
+            and self._requested_index is not None
+        ):
+            self._prefetch_neighbours(self._requested_index)
 
     def _request_current_previews(
         self,
@@ -1520,7 +1538,7 @@ class MainWindow(QMainWindow):
                     requested_spread=spread,
                     requested_bounds=QSize(
                         self.image_viewer.preview_bounds()
-                    ): self._request_current_previews(
+                    ): self._start_single_quality_requests(
                         generation,
                         requested_spread,
                         requested_bounds,
@@ -1732,19 +1750,25 @@ class MainWindow(QMainWindow):
                 priority=1,
             )
 
-    def _prefetch_neighbours(self) -> None:
-        if not (0 <= self.current_index < len(self.image_list)):
+    def _prefetch_neighbours(self, target_index: Optional[int] = None) -> None:
+        base_index = self.current_index if target_index is None else target_index
+        if not (0 <= base_index < len(self.image_list)):
             return
         if self.viewer_mode == ViewerMode.SINGLE:
             spreads = self._compute_spreads()
-            curr_spread = self._get_spread_for_index(self.current_index)
+            curr_spread = self._get_spread_for_index(base_index)
             neighbour_indices = set(curr_spread)
             prefetch_plan: List[tuple[int, int]] = []
             if curr_spread in spreads:
                 pos = spreads.index(curr_spread)
-                if pos < len(spreads) - 1:
-                    neighbour_indices.update(spreads[pos + 1])
-                    prefetch_plan.extend((index, 0) for index in spreads[pos + 1])
+                for offset in (1, 2):
+                    next_pos = pos + offset
+                    if next_pos >= len(spreads):
+                        break
+                    neighbour_indices.update(spreads[next_pos])
+                    prefetch_plan.extend(
+                        (index, 1 - offset) for index in spreads[next_pos]
+                    )
                 if pos > 0:
                     neighbour_indices.update(spreads[pos - 1])
                     prefetch_plan.extend((index, -1) for index in spreads[pos - 1])
@@ -1752,13 +1776,13 @@ class MainWindow(QMainWindow):
             neighbour_indices = {
                 index
                 for index in (
-                    self.current_index - 1,
-                    self.current_index,
-                    self.current_index + 1,
+                    base_index - 1,
+                    base_index,
+                    base_index + 1,
                 )
                 if 0 <= index < len(self.image_list)
             }
-            current_spread_set = {self.current_index}
+            current_spread_set = {base_index}
             prefetch_plan = [
                 (index, 0)
                 for index in sorted(neighbour_indices - current_spread_set)
@@ -2185,7 +2209,7 @@ class MainWindow(QMainWindow):
         elif etype == QEvent.Type.MouseMove:
             if self.image_list:
                 local_pos = watched.mapTo(self, event.position().toPoint())
-                self._hud.on_pointer_move(local_pos.y())
+                self._hud.on_pointer_move(local_pos.y(), local_pos.x())
         return super().eventFilter(watched, event)
 
     def open_file_dialog(self):

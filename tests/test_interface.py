@@ -363,6 +363,17 @@ class TestViewerHud(unittest.TestCase):
         self.assertIn("135%", self.hud._hud_size_label.text())
         self.assertGreater(self.hud.sizeHint().height(), original_height)
 
+    def test_hud_scale_shrinks_responsively_without_changing_preference(self):
+        self.hud.set_hud_scale(135)
+        self.hud.reposition(parent_width=760, parent_height=480)
+
+        self.assertEqual(self.hud.hud_scale(), 135)
+        self.assertLess(self.hud.effective_hud_scale(), 135)
+        self.assertLessEqual(self.hud.width(), 760 - (2 * ViewerHud.EDGE_MARGIN))
+
+        self.hud.reposition(parent_width=1920, parent_height=1080)
+        self.assertEqual(self.hud.effective_hud_scale(), 135)
+
     def test_hud_size_slider_holds_auto_hide_during_drag(self):
         parent = QWidget()
         parent.resize(1280, 720)
@@ -438,6 +449,21 @@ class TestViewerHud(unittest.TestCase):
         self.hud.on_pointer_move(0)
         self.assertFalse(self.hud._is_pointer_in_activation_band)
         self.assertTrue(self.hud._hide_timer.isActive())
+
+    def test_thumbnail_toggle_has_active_border_and_sidebar_reveals_hud(self):
+        self.hud.set_page_count(12)
+        self.hud.reposition(parent_width=1280, parent_height=720)
+        self.assertIn("QPushButton#thumbnailToggle:checked", self.hud.pill.styleSheet())
+        self.assertIn("border: 2px solid #4a90e2", self.hud.pill.styleSheet())
+
+        self.hud.set_thumbnails_visible(True)
+        self.hud.hide_immediately()
+        panel = self.hud.thumbnail_list.geometry()
+        self.hud.on_pointer_move(panel.center().y(), panel.left())
+
+        self.assertFalse(self.hud.isHidden())
+        self.assertFalse(self.hud.thumbnail_list.isHidden())
+        self.assertTrue(self.hud._is_pointer_in_thumbnail_band)
 
     def test_hud_uses_fades_in_both_directions(self):
         self.hud.hide_immediately()
