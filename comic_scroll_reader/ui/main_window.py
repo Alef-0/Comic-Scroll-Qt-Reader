@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
     DEFAULT_HEIGHT = 330
     VIEWER_WIDTH = 1280
     VIEWER_HEIGHT = 720
+    SINGLE_NAVIGATION_PREVIEW_SIZE = QSize(256, 256)
     image_loaded = pyqtSignal(str)
     image_load_failed = pyqtSignal(str)
 
@@ -224,6 +225,8 @@ class MainWindow(QMainWindow):
         self._requested_index: Optional[int] = None
         self._requested_spread: tuple[int, ...] = ()
         self._spread_pending_results: dict[str, DecodeResult] = {}
+        self._navigation_preview_results: dict[str, DecodeResult] = {}
+        self._current_preview_request_generation: Optional[int] = None
         self._request_generation = 0
         self._full_request_keys: set[tuple[str, int, int]] = set()
         self._refine_request_keys: set[tuple[str, int, int]] = set()
@@ -427,8 +430,11 @@ class MainWindow(QMainWindow):
             self._full_request_keys.clear()
             self._refine_request_keys.clear()
             self._spread_pending_results.clear()
+            self._navigation_preview_results.clear()
+            self._current_preview_request_generation = None
             self._image_pipeline.cancel_queued(
                 {
+                    "single-navigation-preview",
                     "current-preview",
                     "refined-preview",
                     "current-full",
@@ -782,6 +788,13 @@ class MainWindow(QMainWindow):
     def _request_hud_thumbnail(self, index: int) -> None:
         if not (0 <= index < len(self.image_list)):
             return
+        if self._hud.page_preview(index) is not None:
+            return
+        base_preview = self.scroll_reader.base_preview(index)
+        if base_preview is not None:
+            pixmap, _source_size, _path = base_preview
+            self._hud.set_thumbnail(index, pixmap.toImage())
+            return
         self._image_pipeline.request_preview(
             self.image_list[index],
             ViewerHud.THUMBNAIL_DECODE_SIZE,
@@ -1056,13 +1069,18 @@ class MainWindow(QMainWindow):
 
         mode_tag = " [Scroll]" if self.viewer_mode == ViewerMode.SCROLL else ""
 
+        page_rows = (
+            self.scroll_reader.comic_rows()
+            if self.viewer_mode == ViewerMode.SCROLL
+            else self._compute_spreads()
+        )
+
+        def row_for_index(index: int) -> tuple[int, ...]:
+            return next((row for row in page_rows if index in row), (index,))
+
         if self._requested_index is not None:
-            spread = (
-                self._get_spread_for_index(self._requested_index)
-                if self.viewer_mode == ViewerMode.SINGLE
-                else (self._requested_index,)
-            )
-            spreads = self._compute_spreads() if self.viewer_mode == ViewerMode.SINGLE else []
+            spread = row_for_index(self._requested_index)
+            spreads = page_rows
             if len(spread) == 2:
                 name1 = self._display_name(self.image_list[spread[0]])
                 name2 = self._display_name(self.image_list[spread[1]])
@@ -1108,12 +1126,8 @@ class MainWindow(QMainWindow):
                 self._hud.hide_immediately()
             return
 
-        spread = (
-            self._get_spread_for_index(self.current_index)
-            if self.viewer_mode == ViewerMode.SINGLE
-            else (self.current_index,)
-        )
-        spreads = self._compute_spreads() if self.viewer_mode == ViewerMode.SINGLE else []
+        spread = row_for_index(self.current_index)
+        spreads = page_rows
 
         if self.viewer_mode == ViewerMode.SCROLL:
             mode_tag = " [Scroll]"
@@ -1132,8 +1146,12 @@ class MainWindow(QMainWindow):
             path2 = self.image_list[spread[1]]
             name1 = self._display_name(path1)
             name2 = self._display_name(path2)
-            sz1 = self.image_viewer.source_size
-            sz2 = self.image_viewer.sec_source_size
+            if self.viewer_mode == ViewerMode.SCROLL:
+                sz1 = self.scroll_reader._get_source_size(path1)
+                sz2 = self.scroll_reader._get_source_size(path2)
+            else:
+                sz1 = self.image_viewer.source_size
+                sz2 = self.image_viewer.sec_source_size
             dim_str = ""
             if sz1.isValid() and sz2.isValid():
                 dim_str = f" ({sz1.width()}x{sz1.height()} + {sz2.width()}x{sz2.height()})"
@@ -1152,7 +1170,7 @@ class MainWindow(QMainWindow):
                     can_next=(pos < len(spreads) - 1),
                     display_label=f"Page {spread[0] + 1}-{spread[1] + 1} / {len(self.image_list)}",
                 )
-                self._hud.set_mode(False)
+                self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
                 self._hud.set_zoom(zoom_factor, zoom_mode)
         else:
             path = self.image_list[self.current_index]
@@ -1302,10 +1320,13 @@ class MainWindow(QMainWindow):
         self._requested_index = base_index
         self._requested_spread = spread
         self._spread_pending_results.clear()
+        self._navigation_preview_results.clear()
+        self._current_preview_request_generation = None
         self._full_request_keys.clear()
         self._refine_request_keys.clear()
         self._image_pipeline.cancel_queued(
             {
+                "single-navigation-preview",
                 "current-preview",
                 "refined-preview",
                 "current-full",
@@ -1315,15 +1336,125 @@ class MainWindow(QMainWindow):
         self.update_title()
 
         bounds = self.image_viewer.preview_bounds()
+        if self.viewer_mode == ViewerMode.SINGLE:
+            cached_pages = []
+            for idx in spread:
+                path = self.image_list[idx]
+                thumbnail = self._hud.page_preview(idx)
+                if thumbnail is not None:
+                    cached_pages.append(
+                        (
+                            thumbnail,
+                            self.scroll_reader.page_source_size(idx),
+                            path,
+                        )
+                    )
+                else:
+                    base_preview = self.scroll_reader.base_preview(idx)
+                    cached_pages.append(base_preview)
+                    if base_preview is not None:
+                        pixmap, _source_size, _path = base_preview
+                        self._hud.set_thumbnail(idx, pixmap.toImage())
+            if cached_pages and all(page is not None for page in cached_pages):
+                self._install_single_preview_pages(
+                    [page for page in cached_pages if page is not None],
+                    reset_view=True,
+                )
+                QTimer.singleShot(
+                    0,
+                    lambda generation=self._request_generation,
+                    requested_spread=spread,
+                    requested_bounds=QSize(bounds): self._request_current_previews(
+                        generation,
+                        requested_spread,
+                        requested_bounds,
+                    ),
+                )
+            else:
+                for idx in spread:
+                    self._image_pipeline.request_preview(
+                        self.image_list[idx],
+                        self.SINGLE_NAVIGATION_PREVIEW_SIZE,
+                        self._request_generation,
+                        purpose="single-navigation-preview",
+                        priority=3,
+                    )
+        else:
+            self._request_current_previews(
+                self._request_generation,
+                spread,
+                bounds,
+            )
+        return True
+
+    def _request_current_previews(
+        self,
+        generation: int,
+        spread: tuple[int, ...],
+        bounds: QSize,
+    ) -> None:
+        """Start sharp previews only after navigation fallback presentation."""
+        if (
+            generation != self._request_generation
+            or self._requested_index is None
+            or spread != self._requested_spread
+            or self._current_preview_request_generation == generation
+        ):
+            return
+        self._current_preview_request_generation = generation
         for idx in spread:
             self._image_pipeline.request_preview(
                 self.image_list[idx],
                 bounds,
-                self._request_generation,
+                generation,
                 purpose="current-preview",
                 priority=2,
             )
-        return True
+
+    def _install_single_preview_pages(
+        self,
+        pages: list[tuple[QPixmap, QSize, str]],
+        *,
+        reset_view: bool,
+    ) -> None:
+        """Install one preview page or a complete preview spread."""
+        if len(pages) == 2:
+            self.image_viewer.set_spread_preview(
+                pages[0],
+                pages[1],
+                reset_view=reset_view,
+            )
+        else:
+            pixmap, source_size, path = pages[0]
+            self.image_viewer.set_preview_pixmap(
+                pixmap,
+                source_size,
+                path,
+                reset_view=reset_view,
+            )
+
+    def _install_single_preview_results(
+        self,
+        spread: tuple[int, ...],
+        results: dict[str, DecodeResult],
+        *,
+        reset_view: bool,
+    ) -> None:
+        """Display one decoded page or an entire decoded spread atomically."""
+        expected_paths = [self.image_list[index] for index in spread]
+        pages = []
+        for path in expected_paths:
+            result = results[path]
+            image = self._transform_image_for_display(result.image, path)
+            pages.append(
+                (
+                    QPixmap.fromImage(image),
+                    self._transformed_source_size(result.source_size, path),
+                    path,
+                )
+            )
+
+        self._install_single_preview_pages(pages, reset_view=reset_view)
 
     def _on_image_ready(self, result: DecodeResult) -> None:
         request = result.request
@@ -1358,6 +1489,45 @@ class MainWindow(QMainWindow):
         if request.request_id != self._request_generation:
             return
 
+        if request.purpose == "single-navigation-preview":
+            if (
+                self.viewer_mode != ViewerMode.SINGLE
+                or self._requested_index is None
+            ):
+                return
+            spread = self._requested_spread or (self._requested_index,)
+            expected_paths = [self.image_list[index] for index in spread]
+            if request.path not in expected_paths:
+                return
+            index = spread[expected_paths.index(request.path)]
+            self._hud.set_thumbnail(
+                index,
+                self._transform_image_for_display(result.image, request.path),
+            )
+            self._navigation_preview_results[request.path] = result
+            if all(
+                path in self._navigation_preview_results for path in expected_paths
+            ):
+                self._install_single_preview_results(
+                    spread,
+                    self._navigation_preview_results,
+                    reset_view=True,
+                )
+                self._navigation_preview_results.clear()
+                QTimer.singleShot(
+                    0,
+                    lambda generation=request.request_id,
+                    requested_spread=spread,
+                    requested_bounds=QSize(
+                        self.image_viewer.preview_bounds()
+                    ): self._request_current_previews(
+                        generation,
+                        requested_spread,
+                        requested_bounds,
+                    ),
+                )
+            return
+
         if request.purpose == "current-preview":
             if self._requested_index is None:
                 return
@@ -1387,49 +1557,24 @@ class MainWindow(QMainWindow):
                 if not preserve_scroll:
                     self._single_scroll_transition = None
 
-            if len(spread) == 2:
-                res1 = self._spread_pending_results[expected_paths[0]]
-                res2 = self._spread_pending_results[expected_paths[1]]
-                image1 = self._transform_image_for_display(
-                    res1.image, res1.request.path
+            displayed_paths = tuple(
+                path
+                for path in (
+                    self.image_viewer.image_path,
+                    self.image_viewer.sec_image_path,
                 )
-                image2 = self._transform_image_for_display(
-                    res2.image, res2.request.path
-                )
-                pix1 = QPixmap.fromImage(image1)
-                pix2 = QPixmap.fromImage(image2)
-                self.image_viewer.set_spread_preview(
-                    (
-                        pix1,
-                        self._transformed_source_size(
-                            res1.source_size, res1.request.path
-                        ),
-                        res1.request.path,
-                    ),
-                    (
-                        pix2,
-                        self._transformed_source_size(
-                            res2.source_size, res2.request.path
-                        ),
-                        res2.request.path,
-                    ),
-                    reset_view=not preserve_scroll,
-                )
-            else:
-                res = self._spread_pending_results[expected_paths[0]]
-                pix = QPixmap.fromImage(
-                    self._transform_image_for_display(res.image, res.request.path)
-                )
-                self.image_viewer.set_preview_pixmap(
-                    pix,
-                    self._transformed_source_size(
-                        res.source_size, res.request.path
-                    ),
-                    res.request.path,
-                    reset_view=not preserve_scroll,
-                )
+                if path is not None
+            )
+            self._install_single_preview_results(
+                spread,
+                self._spread_pending_results,
+                reset_view=not (
+                    preserve_scroll or displayed_paths == tuple(expected_paths)
+                ),
+            )
 
             self._spread_pending_results.clear()
+            self._navigation_preview_results.clear()
 
             if preserve_scroll:
                 _, zoom_factor, horizontal_ratio, at_top = (
@@ -1513,6 +1658,16 @@ class MainWindow(QMainWindow):
                     (request.path, bounds.width(), bounds.height())
                 )
             return
+        if request.purpose == "single-navigation-preview":
+            if self._requested_index is None:
+                return
+            self._navigation_preview_results.clear()
+            self._request_current_previews(
+                request.request_id,
+                self._requested_spread or (self._requested_index,),
+                self.image_viewer.preview_bounds(),
+            )
+            return
         if request.purpose != "current-preview" or self._requested_index is None:
             return
 
@@ -1520,6 +1675,7 @@ class MainWindow(QMainWindow):
         self._requested_index = None
         self._requested_spread = ()
         self._spread_pending_results.clear()
+        self._navigation_preview_results.clear()
         self._single_scroll_transition = None
         if self.current_index < 0:
             self.image_viewer.clear()
@@ -2103,6 +2259,8 @@ class MainWindow(QMainWindow):
         self.current_index = -1
         self._requested_index = None
         self._requested_spread = ()
+        self._spread_pending_results.clear()
+        self._navigation_preview_results.clear()
         self.image_viewer.clear()
         self.scroll_reader.clear()
         self._image_pipeline.wait_for_idle()
@@ -2219,6 +2377,8 @@ class MainWindow(QMainWindow):
         else:
             save_state({"always_save_options": False})
         self._shutdown_started = True
+        self._spread_pending_results.clear()
+        self._navigation_preview_results.clear()
         self._image_pipeline.shutdown()
         if self.pdf_path:
             close_pdf_handler(self.pdf_path)

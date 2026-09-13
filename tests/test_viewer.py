@@ -681,7 +681,7 @@ class TestMainWindow(unittest.TestCase):
         self.assertEqual(window.current_index, 0)
         window.deleteLater()
 
-    def test_navigation_keeps_completed_current_frame_until_replacement(self):
+    def test_navigation_replaces_old_frame_with_target_fallback(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
         current_path = window.image_list[0]
@@ -689,14 +689,16 @@ class TestMainWindow(unittest.TestCase):
             QPixmap(800, 800), current_path
         )
         current_pixmap_key = window.image_viewer.pixmap().cacheKey()
-        current_frame_key = window.image_viewer._prepared_frame.cacheKey()
+        fallback = QPixmap(40, 60)
+        fallback.fill(QColor("cyan"))
+        window.scroll_reader._base_pixmaps[1] = fallback
 
         window.go_to_index(1)
 
-        self.assertEqual(window.image_viewer.pixmap().cacheKey(), current_pixmap_key)
-        self.assertEqual(
-            window.image_viewer._prepared_frame.cacheKey(), current_frame_key
-        )
+        self.assertEqual(window.image_viewer.image_path, window.image_list[1])
+        self.assertNotEqual(window.image_viewer.pixmap().cacheKey(), current_pixmap_key)
+        self.assertEqual(window.image_viewer.pixmap().size(), QSize(40, 60))
+        self.assertEqual(window._requested_index, 1)
         self.assert_loaded(window, 1)
         window.shutdown()
         window.deleteLater()
@@ -1068,6 +1070,124 @@ class TestSpreadSingleViewer(unittest.TestCase):
         self.assertEqual(window.current_index, 0)
         self.assertIn("[1/5]", window.windowTitle())
 
+        window.deleteLater()
+
+    def test_single_mode_shows_low_resolution_target_spread_while_loading(self):
+        from comic_scroll_reader.core.models import ComicMode
+
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_comic_mode(ComicMode.COMICS)
+        window._image_pipeline.wait_for_idle()
+        window.scroll_reader._base_pixmaps.clear()
+
+        requested = []
+        original_request_preview = window._image_pipeline.request_preview
+
+        def record_request(path, bounds, request_id, purpose, priority):
+            requested.append((path, QSize(bounds), request_id, purpose, priority))
+
+        window._image_pipeline.request_preview = record_request
+        try:
+            self.assertTrue(window._request_index(1))
+            fallback_requests = [
+                request
+                for request in requested
+                if request[3] == "single-navigation-preview"
+            ]
+            self.assertEqual(len(fallback_requests), 2)
+            self.assertFalse(
+                any(request[3] == "current-preview" for request in requested)
+            )
+            self.assertTrue(
+                all(
+                    request[1] == MainWindow.SINGLE_NAVIGATION_PREVIEW_SIZE
+                    for request in fallback_requests
+                )
+            )
+
+            for path, bounds, request_id, purpose, _priority in fallback_requests:
+                request = DecodeRequest(
+                    request_id=request_id,
+                    path=path,
+                    purpose=purpose,
+                    bounds=bounds,
+                    cache_key=(path, bounds.width(), bounds.height()),
+                )
+                image = QImage(64, 96, QImage.Format.Format_RGB32)
+                image.fill(QColor("cyan"))
+                window._on_image_ready(
+                    DecodeResult(request, image, QSize(100, 150))
+                )
+            app.processEvents()
+        finally:
+            window._image_pipeline.request_preview = original_request_preview
+
+        self.assertEqual(window._requested_index, 1)
+        self.assertTrue(window.image_viewer.is_spread())
+        self.assertEqual(
+            (window.image_viewer.image_path, window.image_viewer.sec_image_path),
+            tuple(window.image_list[index] for index in (1, 2)),
+        )
+        self.assertEqual(window.image_viewer.pixmap().size(), QSize(64, 96))
+        self.assertEqual(
+            window.image_viewer._active_sec_pixmap().size(), QSize(64, 96)
+        )
+        self.assertEqual(window._hud.page_preview(1).size(), QSize(64, 96))
+        self.assertEqual(window._hud.page_preview(2).size(), QSize(64, 96))
+        self.assertEqual(
+            sum(request[3] == "current-preview" for request in requested),
+            2,
+        )
+
+        window.shutdown()
+        window.deleteLater()
+
+    def test_single_mode_prefers_cached_sidebar_thumbnail_spread(self):
+        from comic_scroll_reader.core.models import ComicMode
+
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_comic_mode(ComicMode.COMICS)
+        window._image_pipeline.wait_for_idle()
+        for index in (1, 2):
+            thumbnail = QImage(24, 36, QImage.Format.Format_RGB32)
+            thumbnail.fill(QColor("cyan"))
+            window._hud.set_thumbnail(index, thumbnail)
+            fallback = QPixmap(32, 48)
+            fallback.fill(QColor("yellow"))
+            window.scroll_reader._base_pixmaps[index] = fallback
+
+        requested = []
+        original_request_preview = window._image_pipeline.request_preview
+        window._image_pipeline.request_preview = (
+            lambda path, bounds, request_id, purpose, priority: requested.append(
+                (path, QSize(bounds), request_id, purpose, priority)
+            )
+        )
+        try:
+            self.assertTrue(window._request_index(1))
+            self.assertTrue(window.image_viewer.is_spread())
+            self.assertEqual(window.image_viewer.pixmap().size(), QSize(24, 36))
+            self.assertEqual(
+                window.image_viewer._active_sec_pixmap().size(), QSize(24, 36)
+            )
+            self.assertFalse(
+                any(request[3] == "current-preview" for request in requested)
+            )
+            app.processEvents()
+        finally:
+            window._image_pipeline.request_preview = original_request_preview
+
+        self.assertFalse(
+            any(request[3] == "single-navigation-preview" for request in requested)
+        )
+        self.assertEqual(
+            sum(request[3] == "current-preview" for request in requested),
+            2,
+        )
+
+        window.shutdown()
         window.deleteLater()
 
     def test_single_mode_wide_spread_isolation(self):

@@ -171,6 +171,24 @@ class ScrollReaderWidget(QAbstractScrollArea):
     def base_pixmap_bytes_used(self) -> int:
         return self._base_pixmap_bytes_used
 
+    def base_preview(
+        self, index: int
+    ) -> Optional[tuple[QPixmap, QSize, str]]:
+        """Return a persistent low-resolution page preview when available."""
+        if not (0 <= index < len(self._image_list)):
+            return None
+        pixmap = self._base_pixmaps.get(index)
+        if pixmap is None or pixmap.isNull():
+            return None
+        path = self._image_list[index]
+        return QPixmap(pixmap), self._display_source_size(path), path
+
+    def page_source_size(self, index: int) -> QSize:
+        """Return the transformed source dimensions for one page."""
+        if not (0 <= index < len(self._image_list)):
+            return QSize()
+        return self._display_source_size(self._image_list[index])
+
     @property
     def double_page(self) -> bool:
         return self._double_page

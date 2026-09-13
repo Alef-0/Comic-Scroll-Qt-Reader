@@ -879,6 +879,25 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
 
         window.deleteLater()
 
+    def test_scroll_mode_hud_numbers_both_pages_in_a_dual_page_row(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_mode(ViewerMode.SCROLL)
+        window.scroll_reader.set_layout_options(
+            double_page=True,
+            detect_double_spreads=True,
+        )
+
+        window.scroll_reader.scroll_to_index(1)
+        window.update_title()
+
+        self.assertEqual(window.scroll_reader.comic_rows(), [(0,), (1, 2)])
+        self.assertEqual(window._hud.btn_page.text(), "Page 2-3 / 3")
+        self.assertIn("[2-3/3]", window.windowTitle())
+        self.assertIn("Scroll", window._hud.btn_mode.text())
+
+        window.deleteLater()
+
     def test_wasd_and_arrows_share_scroll_mode_movement(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)

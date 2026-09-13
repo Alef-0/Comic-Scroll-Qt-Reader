@@ -97,6 +97,7 @@ class ViewerHud(QWidget):
         self._hud_scale_percent = 100
         self._is_adjusting_hud_scale = False
         self._page_count = 0
+        self._display_total_pages = 0
         self._current_thumbnail_index = -1
         self._thumbnail_items_populated = False
         self._thumbnail_requested_indices: set[int] = set()
@@ -390,6 +391,7 @@ class ViewerHud(QWidget):
         display_label: Optional[str] = None,
     ):
         """Update page indicator button and enable/disable navigation buttons."""
+        self._display_total_pages = max(0, total_pages)
         if total_pages <= 0:
             self.btn_page.setText("Page 0 / 0")
             self.btn_prev.setEnabled(False)
@@ -431,6 +433,13 @@ class ViewerHud(QWidget):
 
         self._thumbnail_source_images[index] = image.copy()
         self._render_thumbnail(index)
+
+    def page_preview(self, index: int) -> Optional[QPixmap]:
+        """Return the decoded page pixels behind a sidebar thumbnail."""
+        image = self._thumbnail_source_images.get(index)
+        if image is None or image.isNull():
+            return None
+        return QPixmap.fromImage(image)
 
     def _render_thumbnail(self, index: int) -> None:
         image = self._thumbnail_source_images.get(index)
@@ -746,10 +755,16 @@ class ViewerHud(QWidget):
         self.thumbnail_list.raise_()
 
     def _reserve_page_width(self, total_pages: int) -> None:
-        """Keep the widest page count readable instead of letting it compress."""
+        """Keep both the maximum count and current range label readable."""
         widest_text = f"Page {total_pages} / {total_pages}"
-        text_width = self.btn_page.fontMetrics().horizontalAdvance(widest_text)
-        self.btn_page.setMinimumWidth(text_width + 24)
+        metrics = self.btn_page.fontMetrics()
+        text_width = max(
+            metrics.horizontalAdvance(widest_text),
+            metrics.horizontalAdvance(self.btn_page.text()),
+        )
+        scale = self._hud_scale_percent / 100.0
+        horizontal_padding = max(7, int(round(10 * scale)))
+        self.btn_page.setMinimumWidth(text_width + (2 * horizontal_padding) + 4)
         self.adjustSize()
 
     def set_mode(self, is_scroll: bool):
@@ -813,6 +828,7 @@ class ViewerHud(QWidget):
         """Polish and activate the initial HUD layout before it is displayed."""
         self.ensurePolished()
         self.pill.ensurePolished()
+        self._reserve_page_width(self._display_total_pages)
         self._reserve_comic_mode_width()
         self._reserve_zoom_label_width()
         for layout in (self.pill.layout(), self.layout()):

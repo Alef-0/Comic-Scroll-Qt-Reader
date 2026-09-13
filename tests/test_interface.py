@@ -197,6 +197,30 @@ class TestViewerHud(unittest.TestCase):
         )
         self.assertGreaterEqual(self.hud.btn_page.minimumWidth(), expected_width)
 
+    def test_page_info_expands_for_multi_digit_spread_label(self):
+        label = "Page 13-14 / 52"
+        self.hud.set_page_info(
+            current_index=12,
+            total_pages=52,
+            display_label=label,
+        )
+
+        expected_width = self.hud.btn_page.fontMetrics().horizontalAdvance(label)
+        self.assertEqual(self.hud.btn_page.text(), label)
+        self.assertGreater(self.hud.btn_page.minimumWidth(), expected_width)
+
+    def test_page_preview_reuses_thumbnail_source_without_sidebar_frame(self):
+        self.hud.set_page_count(3)
+        image = QImage(40, 60, QImage.Format.Format_RGB32)
+        image.fill(QColor("cyan"))
+
+        self.hud.set_thumbnail(1, image)
+
+        preview = self.hud.page_preview(1)
+        self.assertIsNotNone(preview)
+        self.assertEqual(preview.size(), QSize(40, 60))
+        self.assertIsNone(self.hud.page_preview(2))
+
     def test_mode_and_zoom_display(self):
         self.assertEqual(
             self.hud.btn_comic_mode.text(),
