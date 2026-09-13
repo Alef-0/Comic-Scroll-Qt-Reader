@@ -408,13 +408,16 @@ class TestScrollReaderWidget(unittest.TestCase):
         )
         rects = self.widget.image_rects
 
-        self.assertEqual(rects[0].width(), rects[1].width())
+        viewport = self.widget.viewport().size()
+        self.assertLessEqual(rects[0].width(), viewport.width())
+        self.assertLessEqual(rects[0].height(), viewport.height())
         self.assertEqual(
             rects[0].x(),
-            (self.widget.viewport().width() - rects[0].width()) // 2,
+            (viewport.width() - rects[0].width()) // 2,
         )
         self.assertGreater(rects[1].y(), rects[0].y())
         self.assertEqual(rects[1].y(), rects[2].y())
+        self.assertEqual(rects[1].height(), rects[2].height())
         self.assertLess(rects[1].x(), rects[2].x())
 
     def test_inverted_double_page_places_first_page_of_pair_on_right(self):
@@ -456,10 +459,8 @@ class TestScrollReaderWidget(unittest.TestCase):
         self.assertNotEqual(rects[3].y(), rects[2].y())
         self.assertNotEqual(rects[4].y(), rects[3].y())
         self.assertEqual(rects[3].width(), rects[1].width())
-        self.assertEqual(
-            rects[4].width(),
-            rects[3].width() * 2 + ScrollReaderWidget.SPACING,
-        )
+        self.assertEqual(rects[4].width(), self.widget.viewport().width())
+        self.assertLessEqual(rects[4].height(), self.widget.viewport().height())
 
     def test_horizontal_detection_uses_fit_height_screen_coverage(self):
         paths = []
@@ -479,7 +480,120 @@ class TestScrollReaderWidget(unittest.TestCase):
 
         self.assertEqual(
             self.widget.horizontal_page_indices(QSize(800, 600)),
-            {1, 2},
+            {1},
+        )
+
+    def test_horizontal_detection_uses_strict_seventy_five_percent_cutoff(self):
+        paths = []
+        for index, width in enumerate((600, 601)):
+            path = os.path.join(self.temp_dir, f"cutoff_{index}.png")
+            image = QImage(width, 600, QImage.Format.Format_RGB32)
+            image.fill(QColor("cyan"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True
+        )
+        self.widget.set_images(paths)
+
+        self.assertEqual(
+            self.widget.horizontal_page_indices(QSize(800, 600)),
+            {1},
+        )
+
+    def test_comic_rows_pair_pages_when_height_fit_widths_include_spacing(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(100, 150), (395, 600), (395, 600)]
+        ):
+            path = os.path.join(self.temp_dir, f"height_fit_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("magenta"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True, page_spacing=True
+        )
+        self.widget.set_images(paths)
+
+        self.assertEqual(
+            self.widget.comic_rows(QSize(800, 600)),
+            [(0,), (1, 2)],
+        )
+
+    def test_comic_rows_allow_pairing_down_to_ninety_percent_height(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(100, 150), (1000, 1000), (1000, 1000)]
+        ):
+            path = os.path.join(self.temp_dir, f"tolerant_pair_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("darkCyan"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True, page_spacing=True
+        )
+        self.widget.set_images(paths)
+
+        self.assertEqual(
+            self.widget.comic_rows(QSize(1280, 690)),
+            [(0,), (1, 2)],
+        )
+        self.assertGreaterEqual(
+            self.widget._paired_height_scale(1, 2, QSize(1280, 690)),
+            ScrollReaderWidget.MIN_PAIRED_HEIGHT_RATIO,
+        )
+
+    def test_comic_rows_reject_pair_below_ninety_percent_height(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(100, 150), (1000, 1000), (1000, 1000)]
+        ):
+            path = os.path.join(self.temp_dir, f"short_pair_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("darkYellow"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True, page_spacing=True
+        )
+        self.widget.set_images(paths)
+
+        self.assertEqual(
+            self.widget.comic_rows(QSize(1200, 700)),
+            [(0,), (1,), (2,)],
+        )
+
+    def test_stranded_single_pages_share_fit_window_height(self):
+        paths = []
+        for index, (width, height) in enumerate(
+            [(100, 150), (1280, 941), (1280, 858), (1280, 953)]
+        ):
+            path = os.path.join(self.temp_dir, f"similar_single_{index}.png")
+            image = QImage(width, height, QImage.Format.Format_RGB32)
+            image.fill(QColor("darkMagenta"))
+            image.save(path, "PNG")
+            paths.append(path)
+
+        self.widget.set_layout_options(
+            double_page=True, detect_double_spreads=True, page_spacing=True
+        )
+        self.widget.set_images(paths)
+        self.widget._layout_double_pages(1280, 690, ScrollReaderWidget.SPACING)
+        rects = self.widget.image_rects
+
+        self.assertEqual(
+            self.widget.comic_rows(QSize(1280, 690)),
+            [(0,), (1,), (2,), (3,)],
+        )
+        self.assertEqual(
+            [rects[index].height() for index in (1, 2, 3)],
+            [690, 690, 690],
         )
 
     def test_comic_rows_pair_only_pages_that_fit_height_together(self):
@@ -533,10 +647,45 @@ class TestScrollReaderWidget(unittest.TestCase):
         self.assertAlmostEqual(zoomed_rects[0].height() / zoomed_rects[0].width(), 2.0, delta=0.02)
         self.assertAlmostEqual(zoomed_rects[1].height() / zoomed_rects[1].width(), 0.5, delta=0.02)
 
-        # Reset zoom
+        # Fit the current page to the window
         self.widget.reset_zoom()
-        self.assertEqual(self.widget.zoom_factor, 1.0)
-        self.assertEqual(self.widget.image_rects[0].width(), initial_w)
+        fitted_rect = self.widget.image_rects[0]
+        self.assertEqual(self.widget.zoom_mode, "window")
+        self.assertLessEqual(fitted_rect.width(), self.widget.viewport().width())
+        self.assertLessEqual(fitted_rect.height(), self.widget.viewport().height())
+
+    def test_hud_smart_fit_cycles_fit_window_then_original_size(self):
+        self.widget.toggle_smart_fit()
+
+        fitted_rect = self.widget.image_rects[0]
+        viewport_size = self.widget.viewport().size()
+        self.assertEqual(self.widget.zoom_mode, "window")
+        self.assertLessEqual(fitted_rect.width(), viewport_size.width())
+        self.assertLessEqual(fitted_rect.height(), viewport_size.height())
+
+        self.widget.toggle_smart_fit()
+
+        original_rect = self.widget.image_rects[0]
+        self.assertEqual(self.widget.zoom_mode, "original")
+        self.assertEqual(original_rect.size(), QSize(200, 400))
+
+    def test_hud_smart_fit_uses_original_when_only_height_overflows(self):
+        viewport_size = self.widget._normalized_viewport_size()
+        source_size = QSize(
+            max(100, viewport_size.width() - 100),
+            viewport_size.height() + 400,
+        )
+        path = os.path.join(self.temp_dir, "tall-original.jpg")
+        image = QImage(source_size, QImage.Format.Format_RGB32)
+        image.fill(QColor("darkBlue"))
+        image.save(path, "JPG")
+        self.widget.set_images([path])
+
+        self.widget.toggle_smart_fit()
+        self.widget.toggle_smart_fit()
+
+        self.assertEqual(self.widget.zoom_mode, "original")
+        self.assertEqual(self.widget.image_rects[0].size(), source_size)
 
     def test_drag_to_pan(self):
         """Mouse left drag translates the vertical scrollbar."""

@@ -252,8 +252,10 @@ class ViewerHud(QWidget):
         self.btn_zoom_out.clicked.connect(self.zoom_out_clicked.emit)
         pill_layout.addWidget(self.btn_zoom_out)
 
-        self.btn_zoom_label = QPushButton("100%", self.pill)
-        self.btn_zoom_label.setToolTip("Reset Zoom to Fit (Ctrl+0)")
+        self.btn_zoom_label = QPushButton("Window", self.pill)
+        self.btn_zoom_label.setToolTip(
+            "Switch between Fit Window and Fit Width / Original Size"
+        )
         self.btn_zoom_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_zoom_label.clicked.connect(self.zoom_reset_clicked.emit)
         pill_layout.addWidget(self.btn_zoom_label)
@@ -757,10 +759,17 @@ class ViewerHud(QWidget):
         else:
             self.btn_mode.setText("📄 Single")
 
-    def set_zoom(self, zoom_factor: float):
-        """Update zoom label display."""
-        pct = int(round(zoom_factor * 100))
-        self.btn_zoom_label.setText(f"{pct}%")
+    def set_zoom(self, zoom_factor: float, mode: str = "custom"):
+        """Show the active fit behavior, using percentages only for manual zoom."""
+        fit_labels = {
+            "window": "Window",
+            "width": "Width",
+            "original": "Original",
+        }
+        label = fit_labels.get(mode)
+        if label is None:
+            label = f"{int(round(zoom_factor * 100))}%"
+        self.btn_zoom_label.setText(label)
 
     def set_fullscreen(self, is_fullscreen: bool):
         """Update fullscreen button tooltip and symbol."""
@@ -791,11 +800,21 @@ class ViewerHud(QWidget):
         self.btn_comic_mode.setFixedWidth(selector_width)
         self._comic_menu.setFixedWidth(selector_width)
 
+    def _reserve_zoom_label_width(self) -> None:
+        """Prevent fit-mode names and custom percentages from shifting the HUD."""
+        metrics = self.btn_zoom_label.fontMetrics()
+        widest_label = max(
+            metrics.horizontalAdvance(label)
+            for label in ("Window", "Width", "Original", "5000%")
+        )
+        self.btn_zoom_label.setFixedWidth(widest_label + 24)
+
     def _refresh_layout_geometry(self) -> None:
         """Polish and activate the initial HUD layout before it is displayed."""
         self.ensurePolished()
         self.pill.ensurePolished()
         self._reserve_comic_mode_width()
+        self._reserve_zoom_label_width()
         for layout in (self.pill.layout(), self.layout()):
             if layout is not None:
                 layout.invalidate()

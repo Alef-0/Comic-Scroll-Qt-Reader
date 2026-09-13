@@ -58,7 +58,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
     PIXMAP_CACHE_BYTES = 64 * MIB
     BASE_PIXMAP_CACHE_BYTES = 32 * MIB
     BASE_PREVIEW_MAX_WIDTH = 128
-    HORIZONTAL_FIT_WIDTH_RATIO = 0.65
+    HORIZONTAL_FIT_WIDTH_RATIO = 0.75
+    MIN_PAIRED_HEIGHT_RATIO = 0.90
 
     def __init__(self, parent=None, pipeline: Optional[ImagePipeline] = None):
         super().__init__(parent)
@@ -107,6 +108,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self._size_transformer: Optional[Callable] = None
 
         self._zoom_factor: float = 1.0
+        self._zoom_mode = "width"
         self._current_visible_index: int = 0
         self._pending_scroll_index: Optional[int] = None
         self._double_page = False
@@ -147,6 +149,11 @@ class ScrollReaderWidget(QAbstractScrollArea):
     @property
     def zoom_factor(self) -> float:
         return self._zoom_factor
+
+    @property
+    def zoom_mode(self) -> str:
+        """Return the named fit mode, or ``custom`` for manual zoom."""
+        return self._zoom_mode
 
     @property
     def image_list(self) -> List[str]:
@@ -206,6 +213,11 @@ class ScrollReaderWidget(QAbstractScrollArea):
         if maintain_ratios is not None:
             self._maintain_ratios = maintain_ratios
 
+        if abs(self._zoom_factor - 1.0) < 1e-6 and not self._maintain_ratios:
+            self._zoom_mode = "window" if self._double_page else "width"
+        else:
+            self._zoom_mode = "custom"
+
         self._relayout()
         if anchor is not None:
             self._restore_resize_anchor(anchor)
@@ -255,6 +267,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
     def clear(self) -> None:
         """Clear all images and reset layout."""
+        self._zoom_mode = "width"
         self._cancel_pending_requests()
         self._cancel_base_requests()
         self._stop_animations()
@@ -288,6 +301,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
 
     def scroll_to_index(self, index: int) -> None:
         """Scroll vertical view directly so image at index starts at the top."""
+        if self._zoom_mode in {"window", "original"}:
+            self._zoom_mode = "custom"
         if not self._image_rects or not (0 <= index < len(self._image_rects)):
             self._pending_scroll_index = index
             return
@@ -345,6 +360,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         if abs(new_zoom - self._zoom_factor) < 1e-6:
             return
 
+        self._zoom_mode = "custom"
         vp_w = self.viewport().width()
         vp_h = self.viewport().height()
 
@@ -388,7 +404,82 @@ class ScrollReaderWidget(QAbstractScrollArea):
         self.set_zoom(self._zoom_factor * 0.8)
 
     def reset_zoom(self) -> None:
-        self.set_zoom(1.0)
+        """Fit the current row inside the viewport."""
+        self._fit_current_row(width_only=False)
+        self._zoom_mode = "window"
+        self.zoom_changed.emit(self._zoom_factor)
+
+    def toggle_smart_fit(self) -> None:
+        """Toggle fit-to-window with width/native sizing for the HUD button."""
+        if not self._image_rects:
+            return
+        if self._zoom_mode != "window":
+            self._fit_current_row(width_only=False)
+            self._zoom_mode = "window"
+            self.zoom_changed.emit(self._zoom_factor)
+            return
+
+        index = max(
+            0, min(self._current_visible_index, len(self._image_rects) - 1)
+        )
+        source_size = self._display_source_size(self._image_list[index])
+        viewport_size = self._normalized_viewport_size()
+        wider_than_viewport = source_size.width() > viewport_size.width()
+        if wider_than_viewport:
+            self._fit_current_row(width_only=True)
+            target_mode = "width"
+        else:
+            for _ in range(3):
+                rect = self._image_rects[index]
+                if rect.width() <= 0:
+                    break
+                ratio = source_size.width() / rect.width()
+                if abs(ratio - 1.0) <= 0.005:
+                    break
+                previous_zoom = self._zoom_factor
+                self.set_zoom(previous_zoom * ratio)
+                if abs(self._zoom_factor - previous_zoom) < 1e-6:
+                    break
+            self.scroll_to_index(index)
+            target_mode = "original"
+        self._zoom_mode = target_mode
+        self.zoom_changed.emit(self._zoom_factor)
+
+    def _fit_current_row(self, *, width_only: bool) -> None:
+        """Scale the current comic row to the viewport width or full window."""
+        if not self._image_rects:
+            return
+
+        index = max(
+            0, min(self._current_visible_index, len(self._image_rects) - 1)
+        )
+        viewport_size = self._normalized_viewport_size()
+        row = next(
+            (
+                candidate
+                for candidate in self.comic_rows(viewport_size)
+                if index in candidate
+            ),
+            (index,),
+        )
+
+        for _ in range(3):
+            bounds = QRect(self._image_rects[row[0]])
+            for row_index in row[1:]:
+                bounds = bounds.united(self._image_rects[row_index])
+            if bounds.width() <= 0 or bounds.height() <= 0:
+                return
+            ratio = viewport_size.width() / bounds.width()
+            if not width_only:
+                ratio = min(ratio, viewport_size.height() / bounds.height())
+            if abs(ratio - 1.0) <= 0.005:
+                break
+            previous_zoom = self._zoom_factor
+            self.set_zoom(previous_zoom * ratio)
+            if abs(self._zoom_factor - previous_zoom) < 1e-6:
+                break
+
+        self.scroll_to_index(row[0])
 
     def set_page_transformers(
         self,
@@ -540,51 +631,104 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 spacing,
             )
 
-        page_width = max(
-            50,
-            int(round(((viewport_width - spacing) / 2.0) * self._zoom_factor)),
-        )
-        content_width = page_width * 2 + spacing
-        content_x = max(0, (viewport_width - content_width) // 2)
-        rects = [QRect() for _ in self._image_list]
         viewport_size = QSize(viewport_width, viewport_height)
-        horizontal_indices = self.horizontal_page_indices(viewport_size)
-        current_y = 0
+        row_layouts = []
 
         for row in self.comic_rows(viewport_size):
             if len(row) == 1:
                 index = row[0]
-                target_width = (
-                    content_width if index in horizontal_indices else page_width
+                source_size = self._display_source_size(self._image_list[index])
+                base_size = source_size.scaled(
+                    viewport_size, Qt.AspectRatioMode.KeepAspectRatio
                 )
-                page_height = self._scaled_height(
-                    self._image_list[index], target_width
+                display_size = QSize(
+                    max(1, int(round(base_size.width() * self._zoom_factor))),
+                    max(1, int(round(base_size.height() * self._zoom_factor))),
                 )
-                page_x = content_x + (content_width - target_width) // 2
+                row_layouts.append((row, (display_size,), display_size.width()))
+                continue
+
+            first_index, second_index = row
+            height_scale = self._paired_height_scale(
+                first_index, second_index, viewport_size
+            )
+            display_height = max(
+                1,
+                int(round(viewport_height * height_scale * self._zoom_factor)),
+            )
+            display_sizes = []
+            for index in row:
+                source_size = self._display_source_size(self._image_list[index])
+                display_sizes.append(
+                    QSize(
+                        max(
+                            1,
+                            int(
+                                round(
+                                    display_height
+                                    * source_size.width()
+                                    / max(1, source_size.height())
+                                )
+                            ),
+                        ),
+                        display_height,
+                    )
+                )
+            row_width = sum(size.width() for size in display_sizes) + spacing
+            row_layouts.append((row, tuple(display_sizes), row_width))
+
+        content_width = max(
+            viewport_width,
+            max((layout[2] for layout in row_layouts), default=0),
+        )
+        rects = [QRect() for _ in self._image_list]
+        current_y = 0
+
+        for row, sizes, row_width in row_layouts:
+            row_x = (content_width - row_width) // 2
+            if len(row) == 1:
+                index = row[0]
+                display_size = sizes[0]
                 rects[index] = QRect(
-                    page_x, current_y, target_width, page_height
+                    row_x,
+                    current_y,
+                    display_size.width(),
+                    display_size.height(),
                 )
-                current_y += page_height + spacing
+                current_y += display_size.height() + spacing
                 continue
 
             index, next_index = row
-            first_height = self._scaled_height(self._image_list[index], page_width)
-            second_height = self._scaled_height(
-                self._image_list[next_index], page_width
-            )
-            left_x = content_x
-            right_x = content_x + page_width + spacing
+            first_size, second_size = sizes
+            left_x = row_x
+            right_x = row_x + first_size.width() + spacing
             if self._invert_page_order:
-                first_x, second_x = right_x, left_x
+                rects[index] = QRect(
+                    row_x + second_size.width() + spacing,
+                    current_y,
+                    first_size.width(),
+                    first_size.height(),
+                )
+                rects[next_index] = QRect(
+                    row_x,
+                    current_y,
+                    second_size.width(),
+                    second_size.height(),
+                )
             else:
-                first_x, second_x = left_x, right_x
-            rects[index] = QRect(
-                first_x, current_y, page_width, first_height
-            )
-            rects[next_index] = QRect(
-                second_x, current_y, page_width, second_height
-            )
-            current_y += max(first_height, second_height) + spacing
+                rects[index] = QRect(
+                    left_x,
+                    current_y,
+                    first_size.width(),
+                    first_size.height(),
+                )
+                rects[next_index] = QRect(
+                    right_x,
+                    current_y,
+                    second_size.width(),
+                    second_size.height(),
+                )
+            current_y += first_size.height() + spacing
 
         self._image_rects = rects
         total_height = max(0, current_y - spacing)
@@ -691,10 +835,21 @@ class ScrollReaderWidget(QAbstractScrollArea):
             / max(1, source_size.height())
         )
 
+    def _paired_height_scale(
+        self, first_index: int, second_index: int, viewport_size: QSize
+    ) -> float:
+        """Return the shared height scale needed for two pages to fit one row."""
+        spacing = self.SPACING if self._page_spacing else 0
+        combined_width = self._fit_height_width(
+            first_index, viewport_size
+        ) + self._fit_height_width(second_index, viewport_size)
+        available_width = max(1.0, viewport_size.width() - spacing)
+        return min(1.0, available_width / max(1.0, combined_width))
+
     def horizontal_page_indices(
         self, viewport_size: Optional[QSize] = None
     ) -> Set[int]:
-        """Return pages covering at least 65% width when fitted to viewport height."""
+        """Return pages covering over 75% width when fitted to viewport height."""
         if not self._detect_double_spreads or not self._image_list:
             return set()
         size = self._normalized_viewport_size(viewport_size)
@@ -702,7 +857,7 @@ class ScrollReaderWidget(QAbstractScrollArea):
         return {
             index
             for index in range(len(self._image_list))
-            if self._fit_height_width(index, size) >= threshold
+            if self._fit_height_width(index, size) > threshold
         }
 
     def comic_rows(
@@ -730,9 +885,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 and next_index not in horizontal_indices
                 and (
                     not self._detect_double_spreads
-                    or self._fit_height_width(index, size)
-                    + self._fit_height_width(next_index, size)
-                    <= size.width()
+                    or self._paired_height_scale(index, next_index, size)
+                    >= self.MIN_PAIRED_HEIGHT_RATIO
                 )
             )
             if can_pair:
@@ -802,6 +956,8 @@ class ScrollReaderWidget(QAbstractScrollArea):
             current_index = i
 
         if current_index != self._current_visible_index:
+            if self._zoom_mode in {"window", "original"}:
+                self._zoom_mode = "custom"
             self._current_visible_index = current_index
             self.visible_image_changed.emit(current_index)
 
@@ -1320,6 +1476,13 @@ class ScrollReaderWidget(QAbstractScrollArea):
                 )
 
     def resizeEvent(self, event: QResizeEvent) -> None:
+        baseline_mode = "window" if self._double_page else "width"
+        if (
+            self._zoom_mode != baseline_mode
+            or abs(self._zoom_factor - 1.0) >= 1e-6
+            or self._maintain_ratios
+        ):
+            self._zoom_mode = "custom"
         resize_anchor = (
             None
             if self._pending_scroll_index is not None

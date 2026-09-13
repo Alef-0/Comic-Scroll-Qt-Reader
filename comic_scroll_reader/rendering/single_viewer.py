@@ -58,6 +58,7 @@ class ImageViewerWidget(QWidget):
         self._image_path: Optional[str] = None
         self._zoom_factor: float = 1.0
         self._pan_offset: QPointF = QPointF(0.0, 0.0)
+        self._zoom_mode = "window"
         self._interactive_transform = False
         self._prepared_frame: Optional[QPixmap] = None
         self._animations: dict[str, GifAnimation] = {}
@@ -90,6 +91,11 @@ class ImageViewerWidget(QWidget):
     def zoom_factor(self) -> float:
         """Return the current zoom factor (1.0 = fit to window)."""
         return self._zoom_factor
+
+    @property
+    def zoom_mode(self) -> str:
+        """Return the named fit mode, or ``custom`` for manual zoom."""
+        return self._zoom_mode
 
     @property
     def pan_offset(self) -> QPointF:
@@ -144,6 +150,8 @@ class ImageViewerWidget(QWidget):
         page_spacing: Optional[bool] = None,
     ) -> None:
         """Update layout options for double page spreads."""
+        if self._zoom_mode != "window":
+            self._zoom_mode = "custom"
         if double_page is not None:
             self._double_page = double_page
         if invert_page_order is not None:
@@ -190,6 +198,7 @@ class ImageViewerWidget(QWidget):
         reset_view: bool = True,
     ) -> None:
         """Atomically replace the display preview without retaining the old full image."""
+        self._zoom_mode = "custom"
         self._preview_pixmap = pixmap
         self._full_pixmap = None
         self._source_size = QSize(source_size)
@@ -214,6 +223,7 @@ class ImageViewerWidget(QWidget):
         reset_view: bool = True,
     ) -> None:
         """Atomically install preview pixmaps for one page or two pages in a spread."""
+        self._zoom_mode = "custom"
         pix1, size1, path1 = first_page
         self._preview_pixmap = pix1
         self._full_pixmap = None
@@ -310,6 +320,7 @@ class ImageViewerWidget(QWidget):
 
     def release_render_cache(self) -> None:
         """Drop all decoded buffers when this viewer is not the active mode."""
+        self._zoom_mode = "custom"
         self._stop_animations()
         self._preview_pixmap = None
         self._full_pixmap = None
@@ -334,6 +345,7 @@ class ImageViewerWidget(QWidget):
 
     def reset_view(self):
         """Reset zoom factor and pan offset back to centered fit-to-window."""
+        self._zoom_mode = "window"
         self._zoom_factor = 1.0
         self._pan_offset = QPointF(0.0, 0.0)
         self._full_pixmap = None
@@ -404,6 +416,7 @@ class ImageViewerWidget(QWidget):
         self, zoom_factor: float, horizontal_ratio: float, at_top: bool
     ) -> None:
         """Restore a scroll-like position after crossing onto another page."""
+        self._zoom_mode = "custom"
         self._zoom_factor = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom_factor))
         limits = self._pan_limits()
         self._pan_offset = QPointF(
@@ -427,6 +440,7 @@ class ImageViewerWidget(QWidget):
         if abs(new_zoom - self._zoom_factor) < 1e-6:
             return
 
+        self._zoom_mode = "custom"
         zoom_ratio = new_zoom / self._zoom_factor
         self._pan_offset = QPointF(
             self._pan_offset.x() * zoom_ratio,
@@ -451,6 +465,76 @@ class ImageViewerWidget(QWidget):
         """Zoom out centered on widget."""
         self.zoom_at(0.8)
 
+    def toggle_smart_fit(self) -> None:
+        """Toggle fit-to-window with width/native sizing for the HUD button."""
+        if not self._has_image():
+            return
+        if self._zoom_mode != "window":
+            self.reset_view()
+            return
+
+        target = self._width_or_original_zoom()
+        if target is None:
+            return
+        target_zoom, target_mode = target
+
+        self._pan_offset = QPointF(0.0, 0.0)
+        if abs(target_zoom - self._zoom_factor) >= 1e-6:
+            self.zoom_at(target_zoom / self._zoom_factor)
+        else:
+            self._clamp_pan_offset()
+            self._update_pan_cursor()
+            self._prepare_frame()
+            self.update()
+        self._zoom_mode = target_mode
+        self.zoom_changed.emit(self._zoom_factor)
+
+    def _width_or_original_zoom(self) -> Optional[tuple[float, str]]:
+        """Return zoom and label for width-fit or original-size content."""
+        if not self._has_image() or self.width() <= 0 or self.height() <= 0:
+            return None
+
+        spacing = 0
+        if self.is_spread():
+            first = self._source_size
+            second = self._sec_source_size
+            native_height = max(first.height(), second.height(), 1)
+            first_width = (
+                first.width() * native_height / max(1, first.height())
+            )
+            second_width = (
+                second.width() * native_height / max(1, second.height())
+            )
+            native_width = first_width + second_width
+            spacing = self.SPACING if self._page_spacing else 0
+            available_width = max(1.0, self.width() - spacing)
+            base_scale = min(
+                available_width / max(1.0, native_width),
+                self.height() / max(1.0, native_height),
+            )
+        else:
+            native_width = float(max(1, self._source_size.width()))
+            native_height = float(max(1, self._source_size.height()))
+            base_scale = min(
+                self.width() / native_width,
+                self.height() / native_height,
+            )
+
+        wider_than_viewport = native_width + spacing > self.width()
+        if wider_than_viewport:
+            target_zoom = (
+                max(1.0, self.width() - spacing)
+                / max(1.0, native_width * base_scale)
+            )
+            target_mode = "width"
+        else:
+            target_zoom = 1.0 / max(base_scale, 1e-9)
+            target_mode = "original"
+        return (
+            max(self.MIN_ZOOM, min(self.MAX_ZOOM, target_zoom)),
+            target_mode,
+        )
+
     def target_rect(self) -> QRect:
         """Calculate the target rectangle of the image/spread within widget bounds,
         accounting for zoom and pan while preserving aspect ratio.
@@ -463,11 +547,14 @@ class ImageViewerWidget(QWidget):
             return QRect()
 
         if not self.is_spread():
-            base_size = self._source_size.scaled(
-                widget_size, Qt.AspectRatioMode.KeepAspectRatio
+            source_width = max(1.0, float(self._source_size.width()))
+            source_height = max(1.0, float(self._source_size.height()))
+            base_scale = min(
+                widget_size.width() / source_width,
+                widget_size.height() / source_height,
             )
-            w = base_size.width() * self._zoom_factor
-            h = base_size.height() * self._zoom_factor
+            w = source_width * base_scale * self._zoom_factor
+            h = source_height * base_scale * self._zoom_factor
             x = (widget_size.width() - w) / 2.0 + self._pan_offset.x()
             y = (widget_size.height() - h) / 2.0 + self._pan_offset.y()
             return QRect(int(round(x)), int(round(y)), int(round(w)), int(round(h)))
@@ -607,6 +694,8 @@ class ImageViewerWidget(QWidget):
 
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
+        if self._zoom_mode != "window":
+            self._zoom_mode = "custom"
         if self._has_image():
             self._clamp_pan_offset()
             self._update_pan_cursor()

@@ -163,7 +163,7 @@ class MainWindow(QMainWindow):
         self._hud.mode_toggled.connect(self.toggle_mode)
         self._hud.zoom_in_clicked.connect(self._zoom_in)
         self._hud.zoom_out_clicked.connect(self._zoom_out)
-        self._hud.zoom_reset_clicked.connect(self._reset_zoom)
+        self._hud.zoom_reset_clicked.connect(self._toggle_hud_smart_fit)
         self._hud.fullscreen_toggled.connect(self.toggle_fullscreen)
         self._hud.comic_mode_selected.connect(self.set_comic_mode)
         self._hud.thumbnails_toggled.connect(self._set_thumbnails_visible)
@@ -222,6 +222,7 @@ class MainWindow(QMainWindow):
         self.image_list: List[str] = []
         self.current_index: int = -1
         self._requested_index: Optional[int] = None
+        self._requested_spread: tuple[int, ...] = ()
         self._spread_pending_results: dict[str, DecodeResult] = {}
         self._request_generation = 0
         self._full_request_keys: set[tuple[str, int, int]] = set()
@@ -242,6 +243,12 @@ class MainWindow(QMainWindow):
         self._single_scroll_transition: Optional[
             tuple[int, float, float, bool]
         ] = None
+        self._single_spread_resize_timer = QTimer(self)
+        self._single_spread_resize_timer.setSingleShot(True)
+        self._single_spread_resize_timer.setInterval(120)
+        self._single_spread_resize_timer.timeout.connect(
+            self._refresh_single_spread_after_resize
+        )
 
         # Native Menu Bar
         self.comic_mode = ComicMode.DEFAULT
@@ -574,6 +581,35 @@ class MainWindow(QMainWindow):
                 return spread
         return (index,)
 
+    def _refresh_single_spread_after_resize(self) -> None:
+        """Reload the current single-mode row when resize changes its grouping."""
+        if (
+            self._shutdown_started
+            or self.viewer_mode != ViewerMode.SINGLE
+            or not self.image_list
+            or not (0 <= self._effective_index() < len(self.image_list))
+        ):
+            return
+
+        index = self._effective_index()
+        expected_spread = self._get_spread_for_index(index)
+        if self._requested_index is not None:
+            if expected_spread != self._requested_spread:
+                self._request_index(expected_spread[0], force=True)
+            return
+
+        displayed_paths = tuple(
+            path
+            for path in (
+                self.image_viewer.image_path,
+                self.image_viewer.sec_image_path,
+            )
+            if path is not None
+        )
+        expected_paths = tuple(self.image_list[i] for i in expected_spread)
+        if displayed_paths != expected_paths:
+            self._request_index(expected_spread[0], force=True)
+
     def _on_scroll_visible_changed(self, index: int) -> None:
         """Update current index and title when scrolling in Scroll Reader mode."""
         if self.viewer_mode == ViewerMode.SCROLL and 0 <= index < len(self.image_list):
@@ -591,6 +627,15 @@ class MainWindow(QMainWindow):
     def _reset_zoom(self) -> None:
         self.image_viewer.reset_view()
         self.scroll_reader.reset_zoom()
+        self.update_title()
+
+    def _toggle_hud_smart_fit(self) -> None:
+        """Cycle the active viewer through smart sizing and fit-to-window."""
+        if self.viewer_mode == ViewerMode.SCROLL:
+            self.scroll_reader.toggle_smart_fit()
+        else:
+            self.image_viewer.toggle_smart_fit()
+        self.update_title()
 
     def _reset_hud_pages(self) -> None:
         """Start a fresh lazy thumbnail set for the current document."""
@@ -1073,9 +1118,11 @@ class MainWindow(QMainWindow):
         if self.viewer_mode == ViewerMode.SCROLL:
             mode_tag = " [Scroll]"
             zoom_factor = self.scroll_reader.zoom_factor
+            zoom_mode = self.scroll_reader.zoom_mode
         else:
             mode_tag = ""
             zoom_factor = self.image_viewer.zoom_factor
+            zoom_mode = self.image_viewer.zoom_mode
 
         zoom_pct = int(round(zoom_factor * 100))
         zoom_str = f" - {zoom_pct}%" if zoom_pct != 100 else ""
@@ -1106,7 +1153,7 @@ class MainWindow(QMainWindow):
                     display_label=f"Page {spread[0] + 1}-{spread[1] + 1} / {len(self.image_list)}",
                 )
                 self._hud.set_mode(False)
-                self._hud.set_zoom(zoom_factor)
+                self._hud.set_zoom(zoom_factor, zoom_mode)
         else:
             path = self.image_list[self.current_index]
             filename = self._display_name(path)
@@ -1138,7 +1185,7 @@ class MainWindow(QMainWindow):
                     can_next=can_next,
                 )
                 self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
-                self._hud.set_zoom(zoom_factor)
+                self._hud.set_zoom(zoom_factor, zoom_mode)
 
     def next_image(self):
         """Navigate to next image or spread in alphabetical order."""
@@ -1253,6 +1300,7 @@ class MainWindow(QMainWindow):
 
         self._request_generation += 1
         self._requested_index = base_index
+        self._requested_spread = spread
         self._spread_pending_results.clear()
         self._full_request_keys.clear()
         self._refine_request_keys.clear()
@@ -1313,11 +1361,7 @@ class MainWindow(QMainWindow):
         if request.purpose == "current-preview":
             if self._requested_index is None:
                 return
-            spread = (
-                self._get_spread_for_index(self._requested_index)
-                if self.viewer_mode == ViewerMode.SINGLE
-                else (self._requested_index,)
-            )
+            spread = self._requested_spread or (self._requested_index,)
             expected_paths = [self.image_list[i] for i in spread]
             if request.path not in expected_paths:
                 return
@@ -1329,6 +1373,7 @@ class MainWindow(QMainWindow):
             accepted_index = self._requested_index
             self.current_index = accepted_index
             self._requested_index = None
+            self._requested_spread = ()
             if self.viewer_mode == ViewerMode.SCROLL:
                 self.scroll_reader.scroll_to_index(accepted_index)
 
@@ -1473,6 +1518,7 @@ class MainWindow(QMainWindow):
 
         failed_path = request.path
         self._requested_index = None
+        self._requested_spread = ()
         self._spread_pending_results.clear()
         self._single_scroll_transition = None
         if self.current_index < 0:
@@ -1682,6 +1728,7 @@ class MainWindow(QMainWindow):
 
         # View Menu
         view_menu = menubar.addMenu("&View")
+        view_menu.setToolTipsVisible(True)
 
         mode_single_action = QAction("Single &Page Mode", self)
         mode_single_action.setShortcut("1")
@@ -1712,13 +1759,16 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._page_spacing_action)
 
         self._double_spread_action = QAction(
-            "Detect Horizontal Spreads (≥65% Screen)", self
+            "Wide Pages (>75% at Fit Height)", self
         )
         self._double_spread_action.setCheckable(True)
         self._double_spread_action.setChecked(True)
         self._double_spread_action.setToolTip(
-            "Show pages covering at least 65% of the screen at fit-height "
-            "as a full row"
+            "Keep pages wider than 75% alone; pair narrower pages when they "
+            "fit at 90% or more of the window height"
+        )
+        self._double_spread_action.setStatusTip(
+            self._double_spread_action.toolTip()
         )
         self._double_spread_action.triggered.connect(
             self._apply_custom_layout_options
@@ -1750,8 +1800,13 @@ class MainWindow(QMainWindow):
         zoom_out_action.triggered.connect(self._zoom_out)
         view_menu.addAction(zoom_out_action)
 
-        zoom_reset_action = QAction("&Fit / Reset Zoom", self)
+        zoom_reset_action = QAction("Fit &Window", self)
         zoom_reset_action.setShortcut("Ctrl+0")
+        zoom_reset_action.setToolTip(
+            "Fit the current page or spread to the window; use the HUD button "
+            "to switch between Window and Width / Original"
+        )
+        zoom_reset_action.setStatusTip(zoom_reset_action.toolTip())
         zoom_reset_action.triggered.connect(self._reset_zoom)
         view_menu.addAction(zoom_reset_action)
 
@@ -2047,6 +2102,7 @@ class MainWindow(QMainWindow):
         self._reset_hud_pages()
         self.current_index = -1
         self._requested_index = None
+        self._requested_spread = ()
         self.image_viewer.clear()
         self.scroll_reader.clear()
         self._image_pipeline.wait_for_idle()
@@ -2085,6 +2141,10 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
         self._hud.reposition(self.width(), self.height())
+        if getattr(self, "image_list", None):
+            self.update_title()
+            if hasattr(self, "_single_spread_resize_timer"):
+                self._single_spread_resize_timer.start()
 
     def leaveEvent(self, event):
         """Begin hiding the HUD when the pointer leaves the reader window."""
@@ -2153,6 +2213,7 @@ class MainWindow(QMainWindow):
         """Finish decoder work before releasing Qt and PDFium resources."""
         if self._shutdown_started:
             return
+        self._single_spread_resize_timer.stop()
         if self._always_save_options_action.isChecked():
             save_state(self._state_snapshot())
         else:

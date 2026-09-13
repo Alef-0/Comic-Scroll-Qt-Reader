@@ -119,6 +119,55 @@ class TestImageViewerWidget(unittest.TestCase):
         self.assertEqual(rect.x(), 0)
         self.assertEqual(rect.y(), 100)
 
+    def test_hud_smart_fit_uses_width_then_fit_window_for_large_page(self):
+        self.viewer.set_preview_pixmap(
+            QPixmap(80, 120), QSize(1200, 1800), "large.png"
+        )
+
+        self.viewer.toggle_smart_fit()
+        self.assertAlmostEqual(self.viewer.zoom_factor, 2.0)
+        self.assertEqual(self.viewer.target_rect().size(), QSize(800, 1200))
+
+        self.viewer.toggle_smart_fit()
+        self.assertEqual(self.viewer.zoom_factor, 1.0)
+        self.assertEqual(self.viewer.target_rect().size(), QSize(400, 600))
+
+    def test_hud_smart_fit_uses_original_size_for_small_page(self):
+        self.viewer.set_preview_pixmap(
+            QPixmap(80, 60), QSize(400, 300), "small.png"
+        )
+
+        self.viewer.toggle_smart_fit()
+
+        self.assertAlmostEqual(self.viewer.zoom_factor, 0.5)
+        self.assertEqual(self.viewer.target_rect().size(), QSize(400, 300))
+
+    def test_hud_smart_fit_uses_original_when_only_height_overflows(self):
+        self.viewer.set_preview_pixmap(
+            QPixmap(72, 101), QSize(720, 1012), "tall-original.jpg"
+        )
+
+        self.viewer.toggle_smart_fit()
+
+        self.assertEqual(self.viewer.zoom_mode, "original")
+        self.assertEqual(self.viewer.target_rect().size(), QSize(720, 1012))
+
+    def test_manual_zoom_restarts_hud_smart_fit_cycle(self):
+        self.viewer.set_preview_pixmap(
+            QPixmap(80, 120), QSize(1200, 1800), "large.png"
+        )
+        self.viewer.toggle_smart_fit()
+
+        self.viewer.zoom_out()
+        self.viewer.toggle_smart_fit()
+
+        self.assertEqual(self.viewer.zoom_mode, "window")
+        self.assertAlmostEqual(self.viewer.zoom_factor, 1.0)
+
+        self.viewer.toggle_smart_fit()
+        self.assertEqual(self.viewer.zoom_mode, "width")
+        self.assertAlmostEqual(self.viewer.zoom_factor, 2.0)
+
     def test_target_rect_tall_aspect_ratio(self):
         """Verify target_rect computes correct dimensions for tall image."""
         img = QImage(100, 200, QImage.Format.Format_RGB32)
@@ -1040,6 +1089,45 @@ class TestSpreadSingleViewer(unittest.TestCase):
                 if idx in spread_indices:
                     self.assertEqual(len(spread), 1)
 
+        window.deleteLater()
+
+    def test_single_mode_reloads_spread_when_resize_changes_grouping(self):
+        from comic_scroll_reader.core.models import ComicMode
+
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_comic_mode(ComicMode.COMICS)
+
+        window.image_viewer.resize(400, 600)
+        window.go_to_index(1)
+        self.assertTrue(
+            wait_for_signal(
+                window.image_loaded,
+                lambda: window.current_index == 1
+                and not window.image_viewer.is_spread(),
+            )
+        )
+
+        window.image_viewer.resize(1200, 600)
+        window._refresh_single_spread_after_resize()
+        self.assertTrue(
+            wait_for_signal(
+                window.image_loaded,
+                lambda: window.current_index == 1
+                and window.image_viewer.is_spread(),
+            )
+        )
+
+        window.image_viewer.resize(400, 600)
+        window._refresh_single_spread_after_resize()
+        self.assertTrue(
+            wait_for_signal(
+                window.image_loaded,
+                lambda: window.current_index == 1
+                and not window.image_viewer.is_spread(),
+            )
+        )
+        window.shutdown()
         window.deleteLater()
 
 

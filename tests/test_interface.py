@@ -212,6 +212,15 @@ class TestViewerHud(unittest.TestCase):
         self.hud.set_zoom(1.5)
         self.assertEqual(self.hud.btn_zoom_label.text(), "150%")
 
+        self.hud.set_zoom(1.0, "window")
+        self.assertEqual(self.hud.btn_zoom_label.text(), "Window")
+
+        self.hud.set_zoom(2.0, "width")
+        self.assertEqual(self.hud.btn_zoom_label.text(), "Width")
+
+        self.hud.set_zoom(0.5, "original")
+        self.assertEqual(self.hud.btn_zoom_label.text(), "Original")
+
     def test_comic_mode_selector_and_choices_keep_one_width(self):
         selector_width = self.hud.btn_comic_mode.width()
         self.assertEqual(self.hud._comic_menu.width(), selector_width)
@@ -588,6 +597,10 @@ class TestMainWindowInterface(unittest.TestCase):
         )
         self.assertTrue(window._directional_pan_action.isChecked())
         self.assertTrue(window._double_spread_action.isChecked())
+        self.assertTrue(menus["&View"].toolTipsVisible())
+        self.assertIn("Wide Pages (>75% at Fit Height)", view_actions)
+        self.assertIn("90% or more", window._double_spread_action.toolTip())
+        self.assertIn("Fit &Window", view_actions)
         self.assertIn("Maintain ratios in scroll", view_actions)
         self.assertIn("Show Page &Thumbnails", view_actions)
         self.assertIn("Place HUD at &Top", view_actions)
