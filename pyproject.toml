@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-scroll-reader"
-version = "1.1.0"
+version = "1.2.0"
 description = "Desktop reader for comic folders, CBZ/CBR books, webtoons, manga, and PDF documents."
 readme = "README.md"
 license = {text = "MIT"}

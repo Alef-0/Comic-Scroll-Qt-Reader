@@ -50,7 +50,7 @@ mkdir -p "$DMG_STAGE"
 cp -R "$APP_BUNDLE" "$DMG_STAGE/"
 ln -s /Applications "$DMG_STAGE/Applications"
 
-VERSION="$("$PYTHON_BIN" -c "import comic_scroll_reader; print(comic_scroll_reader.__version__)" 2>/dev/null || echo "1.1.0")"
+VERSION="$("$PYTHON_BIN" -c "import comic_scroll_reader; print(comic_scroll_reader.__version__)" 2>/dev/null || echo "1.2.0")"
 DMG_OUTPUT="$DIST_DIR/Comic-Scroll-Reader-${VERSION}.dmg"
 rm -f "$DMG_OUTPUT"
 

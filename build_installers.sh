@@ -21,7 +21,7 @@ else
     exit 1
 fi
 
-VERSION="$("$PYTHON_BIN" -c "import comic_scroll_reader; print(comic_scroll_reader.__version__)" 2>/dev/null || echo "1.1.0")"
+VERSION="$("$PYTHON_BIN" -c "import comic_scroll_reader; print(comic_scroll_reader.__version__)" 2>/dev/null || echo "1.2.0")"
 ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 case "$ARCH" in
     x86_64) DEB_ARCH="amd64"; RPM_ARCH="x86_64" ;;
