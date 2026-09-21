@@ -701,6 +701,93 @@ class TestMainWindow(unittest.TestCase):
         self.assertEqual(window.current_index, 0)
         window.deleteLater()
 
+    def test_single_navigation_discovers_a_new_page_at_the_folder_end(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.last_image()
+        self.assert_loaded(window, 2)
+
+        new_path = os.path.join(self.temp_dir, "page11.png")
+        image = QImage(100, 100, QImage.Format.Format_RGB32)
+        image.fill(QColor("blue"))
+        image.save(new_path, "PNG")
+
+        window.next_image()
+
+        self.assert_loaded(window, 3)
+        self.assertEqual(window.image_list[3], new_path)
+        self.assertIn("[4/4]", window.windowTitle())
+        window.shutdown()
+        window.deleteLater()
+
+    def test_folder_refresh_preserves_current_page_when_sort_order_changes(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.next_image()
+        self.assert_loaded(window, 1)
+        current_path = window.image_list[window.current_index]
+
+        new_path = os.path.join(self.temp_dir, "page0.png")
+        image = QImage(100, 100, QImage.Format.Format_RGB32)
+        image.fill(QColor("blue"))
+        image.save(new_path, "PNG")
+
+        self.assertTrue(window._refresh_folder_images())
+
+        self.assertEqual(window.image_list[window.current_index], current_path)
+        self.assertEqual(window.current_index, 2)
+        self.assertEqual(len(window.image_list), 4)
+        window.shutdown()
+        window.deleteLater()
+
+    def test_folder_refresh_falls_forward_when_current_page_is_deleted(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.next_image()
+        self.assert_loaded(window, 1)
+        deleted_path = window.image_list[window.current_index]
+
+        os.remove(deleted_path)
+
+        self.assertTrue(window._refresh_folder_images())
+        self.assertNotIn(deleted_path, window.image_list)
+        expected_path = window.image_list[1]
+        self.assertTrue(
+            wait_for_signal(
+                window.image_loaded,
+                lambda: window._requested_index is None
+                and window.image_viewer.image_path == expected_path,
+            )
+        )
+        self.assertTrue(window.image_list[window.current_index].endswith("page10.png"))
+        self.assertIn("[2/2]", window.windowTitle())
+        window.shutdown()
+        window.deleteLater()
+
+    def test_folder_refresh_recovers_after_all_pages_are_deleted(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        for path in list(window.image_list):
+            os.remove(path)
+
+        self.assertTrue(window._refresh_folder_images())
+        self.assertEqual(window.image_list, [])
+        self.assertEqual(window.current_index, -1)
+        self.assertIs(window._stack.currentWidget(), window.welcome_widget)
+        self.assertTrue(window._folder_refresh_timer.isActive())
+
+        restored_path = os.path.join(self.temp_dir, "page20.png")
+        image = QImage(100, 100, QImage.Format.Format_RGB32)
+        image.fill(QColor("blue"))
+        image.save(restored_path, "PNG")
+
+        self.assertTrue(window._refresh_folder_images())
+        self.assert_loaded(window, 0)
+        self.assertEqual(window.image_list, [restored_path])
+        self.assertIs(window._stack.currentWidget(), window.image_viewer)
+        window.shutdown()
+        window.deleteLater()
+
     def test_navigation_replaces_old_frame_with_target_fallback(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)

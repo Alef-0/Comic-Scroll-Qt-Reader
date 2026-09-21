@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
     VIEWER_WIDTH = 1280
     VIEWER_HEIGHT = 720
     SINGLE_NAVIGATION_PREVIEW_SIZE = QSize(256, 256)
+    FOLDER_REFRESH_INTERVAL_MS = 2000
     image_loaded = pyqtSignal(str)
     image_load_failed = pyqtSignal(str)
 
@@ -246,6 +247,10 @@ class MainWindow(QMainWindow):
         self._single_spread_resize_timer.timeout.connect(
             self._refresh_single_spread_after_resize
         )
+        self._folder_refresh_in_progress = False
+        self._folder_refresh_timer = QTimer(self)
+        self._folder_refresh_timer.setInterval(self.FOLDER_REFRESH_INTERVAL_MS)
+        self._folder_refresh_timer.timeout.connect(self._refresh_folder_images)
 
         # Native Menu Bar
         self.comic_mode = ComicMode.DEFAULT
@@ -451,6 +456,7 @@ class MainWindow(QMainWindow):
 
         self.update_title()
         self._sync_comic_mode_state()
+        self._sync_folder_refresh_timer()
 
     def toggle_mode(self) -> None:
         """Alternate between Single Image and Scroll Reader modes."""
@@ -619,6 +625,23 @@ class MainWindow(QMainWindow):
             self.current_index = index
             self.update_title()
 
+    def _sync_folder_refresh_timer(self) -> None:
+        """Poll scroll-mode folders, including an open folder that became empty."""
+        should_run = bool(
+            not self._shutdown_started
+            and self.folder_path
+            and not self.pdf_path
+            and not self.archive_path
+            and (
+                self.viewer_mode == ViewerMode.SCROLL
+                or not self.image_list
+            )
+        )
+        if should_run:
+            self._folder_refresh_timer.start()
+        else:
+            self._folder_refresh_timer.stop()
+
     def _zoom_in(self) -> None:
         self.image_viewer.zoom_in()
         self.scroll_reader.zoom_in()
@@ -643,11 +666,208 @@ class MainWindow(QMainWindow):
     def _reset_hud_pages(self) -> None:
         """Start a fresh lazy thumbnail set for the current document."""
         self._page_edits.clear()
+        self._refresh_hud_pages()
+
+    def _refresh_hud_pages(self) -> None:
+        """Rebuild page-to-thumbnail mappings while preserving page edits."""
         self._thumbnail_generation += 1
         self._thumbnail_indices_by_path = {
             path: index for index, path in enumerate(self.image_list)
         }
         self._hud.set_page_count(len(self.image_list))
+
+    def _scan_folder_images(self) -> Optional[List[str]]:
+        """Return the currently available supported files in the open folder."""
+        if not self.folder_path or not os.path.isdir(self.folder_path):
+            return None
+
+        discovered = []
+        try:
+            for entry in os.scandir(self.folder_path):
+                if not entry.is_file():
+                    continue
+                extension = os.path.splitext(entry.name)[1].lower()
+                if extension in SUPPORTED_EXTENSIONS:
+                    discovered.append(entry.path)
+        except OSError as error:
+            print(
+                f"Error reading folder '{self.folder_path}': {error}",
+                file=sys.stderr,
+            )
+            return None
+        return sorted(discovered, key=natural_sort_key)
+
+    def _refresh_folder_images(self) -> bool:
+        """Reconcile folder additions and deletions while retaining reading position."""
+        if (
+            self._folder_refresh_in_progress
+            or self._shutdown_started
+            or not self.folder_path
+            or self.pdf_path
+            or self.archive_path
+        ):
+            return False
+
+        self._folder_refresh_in_progress = True
+        try:
+            discovered = self._scan_folder_images()
+            if discovered is None or discovered == self.image_list:
+                return False
+
+            old_paths = list(self.image_list)
+            effective_index = self._effective_index()
+            effective_path = (
+                old_paths[effective_index]
+                if 0 <= effective_index < len(old_paths)
+                else None
+            )
+            pending_path = (
+                effective_path if self._requested_index is not None else None
+            )
+            current_path = (
+                old_paths[self.current_index]
+                if 0 <= self.current_index < len(old_paths)
+                else effective_path
+            )
+
+            anchor_path = current_path
+            anchor_ratio = 0.0
+            rects = self.scroll_reader.image_rects
+            if rects:
+                scroll_y = self.scroll_reader.verticalScrollBar().value()
+                anchor_index = 0
+                for index, rect in enumerate(rects):
+                    if rect.y() > scroll_y:
+                        break
+                    anchor_index = index
+                if 0 <= anchor_index < len(old_paths):
+                    anchor_path = old_paths[anchor_index]
+                    rect = rects[anchor_index]
+                    anchor_ratio = max(
+                        0.0,
+                        min(1.0, (scroll_y - rect.y()) / max(1, rect.height())),
+                    )
+
+            self._request_generation += 1
+            self._requested_index = None
+            self._requested_spread = ()
+            self._spread_pending_results.clear()
+            self._navigation_preview_results.clear()
+            self._current_preview_request_generation = None
+            self._full_request_keys.clear()
+            self._refine_request_keys.clear()
+            self._single_scroll_transition = None
+            self._image_pipeline.cancel_queued(
+                {
+                    "single-navigation-preview",
+                    "current-preview",
+                    "refined-preview",
+                    "current-full",
+                    "prefetch-preview",
+                    "hud-thumbnail",
+                }
+            )
+
+            self.image_list = discovered
+            retained_paths = set(self.image_list)
+            self._page_edits = {
+                path: edit
+                for path, edit in self._page_edits.items()
+                if path in retained_paths
+            }
+
+            if not self.image_list:
+                self.current_index = -1
+                self._refresh_hud_pages()
+                self.image_viewer.clear()
+                self.scroll_reader.clear()
+                self._stack.setCurrentWidget(self.welcome_widget)
+                self._hud.hide_immediately()
+                self._sync_folder_refresh_timer()
+                self.update_title()
+                return True
+
+            fallback_old_index = (
+                effective_index
+                if 0 <= effective_index < len(old_paths)
+                else self.current_index
+            )
+            fallback_index = max(
+                0,
+                min(fallback_old_index, len(self.image_list) - 1),
+            )
+            fallback_path = self.image_list[fallback_index]
+            if current_path in retained_paths:
+                selected_path = current_path
+            elif effective_path in retained_paths:
+                selected_path = effective_path
+            else:
+                selected_path = fallback_path
+            self.current_index = self.image_list.index(selected_path)
+
+            self._refresh_hud_pages()
+            self.setMinimumSize(320, 180)
+            self.setMaximumSize(16777215, 16777215)
+            target_widget = (
+                self.scroll_reader
+                if self.viewer_mode == ViewerMode.SCROLL
+                else self.image_viewer
+            )
+            self._stack.setCurrentWidget(target_widget)
+            self._sync_folder_refresh_timer()
+            if anchor_path not in retained_paths:
+                anchor_path = selected_path
+            scroll_index = (
+                self.image_list.index(anchor_path)
+                if anchor_path in self.image_list
+                else self.current_index
+            )
+            self.scroll_reader.set_images(
+                self.image_list,
+                start_index=scroll_index,
+            )
+            refreshed_rects = self.scroll_reader.image_rects
+            if 0 <= scroll_index < len(refreshed_rects):
+                rect = refreshed_rects[scroll_index]
+                self.scroll_reader.verticalScrollBar().setValue(
+                    rect.y() + int(round(anchor_ratio * rect.height()))
+                )
+
+            if self.viewer_mode == ViewerMode.SCROLL:
+                visible_index = self.scroll_reader.current_visible_index()
+                if 0 <= visible_index < len(self.image_list):
+                    self.current_index = visible_index
+                self.update_title()
+            else:
+                target_path = (
+                    pending_path
+                    if pending_path in retained_paths
+                    else selected_path
+                )
+                target_index = (
+                    self.image_list.index(target_path)
+                    if target_path in self.image_list
+                    else self.current_index
+                )
+                target_spread = self._get_spread_for_index(target_index)
+                expected_paths = tuple(
+                    self.image_list[index] for index in target_spread
+                )
+                displayed_paths = tuple(
+                    path
+                    for path in (
+                        self.image_viewer.image_path,
+                        self.image_viewer.sec_image_path,
+                    )
+                    if path is not None
+                )
+                if pending_path is not None or displayed_paths != expected_paths:
+                    self._request_index(target_index, force=True)
+                else:
+                    self.update_title()
+            return True
+        finally:
+            self._folder_refresh_in_progress = False
 
     def _set_thumbnails_visible(self, visible: bool) -> None:
         """Keep the HUD button and View-menu thumbnail option synchronized."""
@@ -824,19 +1044,7 @@ class MainWindow(QMainWindow):
             self.archive_path = None
 
         self.folder_path = os.path.abspath(folder_path)
-        discovered = []
-
-        if os.path.exists(self.folder_path) and os.path.isdir(self.folder_path):
-            try:
-                for entry in os.scandir(self.folder_path):
-                    if entry.is_file():
-                        ext = os.path.splitext(entry.name)[1].lower()
-                        if ext in SUPPORTED_EXTENSIONS:
-                            discovered.append(entry.path)
-            except OSError as e:
-                print(f"Error reading folder '{self.folder_path}': {e}", file=sys.stderr)
-
-        self.image_list = sorted(discovered, key=natural_sort_key)
+        self.image_list = self._scan_folder_images() or []
 
         requested_index = 0 if self.image_list else -1
         if initial_file:
@@ -877,8 +1085,10 @@ class MainWindow(QMainWindow):
             self._hud.set_mode(self.viewer_mode == ViewerMode.SCROLL)
             self._hud.reposition(self.width(), self.height())
             self._hud.hide_immediately()
+            self._sync_folder_refresh_timer()
             return res
         else:
+            self._sync_folder_refresh_timer()
             self.image_viewer.clear()
             self.scroll_reader.clear()
             self.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
@@ -919,6 +1129,7 @@ class MainWindow(QMainWindow):
         self.pdf_path = resolved
         self.archive_path = None
         self.folder_path = os.path.dirname(resolved)
+        self._sync_folder_refresh_timer()
         self.image_list = [
             build_pdf_page_uri(resolved, i) for i in range(handler.page_count)
         ]
@@ -984,6 +1195,7 @@ class MainWindow(QMainWindow):
         self.archive_path = resolved
         self.pdf_path = None
         self.folder_path = os.path.dirname(resolved)
+        self._sync_folder_refresh_timer()
         self.image_list = [
             build_archive_page_uri(resolved, index)
             for index in range(handler.page_count)
@@ -1206,6 +1418,17 @@ class MainWindow(QMainWindow):
         """Navigate to next image or spread in alphabetical order."""
         if not self.image_list:
             return
+        active_index = self._effective_index()
+        active_path = (
+            self.image_list[active_index]
+            if 0 <= active_index < len(self.image_list)
+            else None
+        )
+        self._refresh_folder_images()
+        if not self.image_list or (
+            active_path is not None and active_path not in self.image_list
+        ):
+            return
         if self.viewer_mode == ViewerMode.SINGLE:
             spreads = self._compute_spreads()
             curr_spread = self._get_spread_for_index(self._effective_index())
@@ -1221,6 +1444,17 @@ class MainWindow(QMainWindow):
     def prev_image(self):
         """Navigate to previous image or spread in alphabetical order."""
         if not self.image_list:
+            return
+        active_index = self._effective_index()
+        active_path = (
+            self.image_list[active_index]
+            if 0 <= active_index < len(self.image_list)
+            else None
+        )
+        self._refresh_folder_images()
+        if not self.image_list or (
+            active_path is not None and active_path not in self.image_list
+        ):
             return
         if self.viewer_mode == ViewerMode.SINGLE:
             spreads = self._compute_spreads()
@@ -1239,6 +1473,17 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Cross a page boundary while retaining the single-view scroll state."""
         if not self.image_list:
+            return
+        active_index = self._effective_index()
+        active_path = (
+            self.image_list[active_index]
+            if 0 <= active_index < len(self.image_list)
+            else None
+        )
+        self._refresh_folder_images()
+        if not self.image_list or (
+            active_path is not None and active_path not in self.image_list
+        ):
             return
         if self.viewer_mode == ViewerMode.SINGLE:
             spreads = self._compute_spreads()
@@ -1268,10 +1513,15 @@ class MainWindow(QMainWindow):
     def first_image(self):
         """Navigate to the first image."""
         if self.image_list:
-            self.go_to_index(0)
+            self._refresh_folder_images()
+            if self.image_list:
+                self.go_to_index(0)
 
     def last_image(self):
         """Navigate to the last image or spread."""
+        if not self.image_list:
+            return
+        self._refresh_folder_images()
         if not self.image_list:
             return
         if self.viewer_mode == ViewerMode.SINGLE:
@@ -1796,6 +2046,11 @@ class MainWindow(QMainWindow):
         base_index = self.current_index if target_index is None else target_index
         if not (0 <= base_index < len(self.image_list)):
             return
+        base_path = self.image_list[base_index]
+        self._refresh_folder_images()
+        if base_path not in self.image_list:
+            return
+        base_index = self.image_list.index(base_path)
         if self.viewer_mode == ViewerMode.SINGLE:
             spreads = self._compute_spreads()
             curr_spread = self._get_spread_for_index(base_index)
@@ -2287,6 +2542,9 @@ class MainWindow(QMainWindow):
         """Prompt user for a page number to jump to."""
         if not self.image_list:
             return
+        self._refresh_folder_images()
+        if not self.image_list:
+            return
         total = len(self.image_list)
         current = self.current_index + 1 if self.current_index >= 0 else 1
         page, ok = QInputDialog.getInt(
@@ -2320,6 +2578,7 @@ class MainWindow(QMainWindow):
     def close_current(self):
         """Close current document or folder and return to welcome screen."""
         self.folder_path = None
+        self._sync_folder_refresh_timer()
         self.image_list = []
         self._reset_hud_pages()
         self.current_index = -1
@@ -2438,6 +2697,7 @@ class MainWindow(QMainWindow):
         if self._shutdown_started:
             return
         self._single_spread_resize_timer.stop()
+        self._folder_refresh_timer.stop()
         if self._always_save_options_action.isChecked():
             save_state(self._state_snapshot())
         else:

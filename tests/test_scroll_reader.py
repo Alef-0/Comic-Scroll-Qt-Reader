@@ -928,6 +928,53 @@ class TestMainWindowScrollReaderMode(unittest.TestCase):
 
         window.deleteLater()
 
+    def test_scroll_folder_refresh_preserves_visible_page_and_enables_polling(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_mode(ViewerMode.SCROLL)
+        window.scroll_reader.scroll_to_index(1)
+        current_path = window.image_list[window.current_index]
+
+        new_path = os.path.join(self.temp_dir, "page0.png")
+        image = QImage(100, 150, QImage.Format.Format_RGB32)
+        image.fill(QColor("yellow"))
+        image.save(new_path, "PNG")
+
+        self.assertTrue(window._folder_refresh_timer.isActive())
+        self.assertTrue(window._refresh_folder_images())
+        self.assertEqual(
+            window.image_list[window.current_index],
+            current_path,
+        )
+        self.assertEqual(window.scroll_reader.image_list, window.image_list)
+        self.assertEqual(len(window.image_list), 4)
+
+        window.shutdown()
+        window.deleteLater()
+
+    def test_scroll_folder_refresh_repositions_after_visible_page_is_deleted(self):
+        window = MainWindow(target_path=self.temp_dir)
+        self.assert_loaded(window, 0)
+        window.set_mode(ViewerMode.SCROLL)
+        window.scroll_reader.scroll_to_index(1)
+        deleted_path = window.image_list[window.current_index]
+
+        os.remove(deleted_path)
+
+        self.assertTrue(window._refresh_folder_images())
+        self.assertNotIn(deleted_path, window.image_list)
+        self.assertEqual(
+            window.image_list[window.current_index],
+            os.path.join(self.temp_dir, "page10.png"),
+        )
+        self.assertEqual(
+            window.scroll_reader.current_visible_index(),
+            window.current_index,
+        )
+
+        window.shutdown()
+        window.deleteLater()
+
     def test_scroll_mode_hud_numbers_both_pages_in_a_dual_page_row(self):
         window = MainWindow(target_path=self.temp_dir)
         self.assert_loaded(window, 0)
